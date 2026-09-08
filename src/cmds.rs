@@ -80,13 +80,28 @@ pass_env = ["TERM", "COLORTERM", "LANG"]
     );
     if dry_run() {
         print!("{template}");
+        warn_if_unmappable(&project);
         return Ok(());
     }
     fs::write(&dest, template).with_context(|| format!("cannot write {}", dest.display()))?;
     // `init` runs unprivileged, but may also be reached through sudo.
     let _ = std::os::unix::fs::chown(&dest, Some(host().user.uid), Some(host().user.gid));
     println!("wrote {}", dest.display());
+    warn_if_unmappable(&project);
     Ok(())
+}
+
+/// `init` is usually the first command run in a project, which makes it the
+/// earliest chance to say that this one can never be put in a box.
+fn warn_if_unmappable(project: &Path) {
+    if let Some(base) = nspawn::shadowed_by_nspawn(project) {
+        crate::warn(&format!(
+            "{} is under {base}, which systemd-nspawn covers with a mount of its \
+             own, so this project cannot be mapped into a box. Move it elsewhere \
+             - see docs/troubleshooting.md.",
+            project.display()
+        ));
+    }
 }
 
 pub fn shell(
@@ -232,12 +247,21 @@ pub fn status(dir: &Option<PathBuf>, overrides: &Overrides) -> Result<()> {
     println!("shell      {}", sb.shell());
     println!("mounts");
     for bind in sb.binds() {
+        let note = match nspawn::shadowed_by_nspawn(&bind.dst) {
+            Some(base) => format!("   << unsupported: nspawn owns {base}"),
+            None => String::new(),
+        };
         println!(
-            "  {:<2} {} -> {}",
+            "  {:<2} {} -> {}{note}",
             bind.kind(),
             bind.src.display(),
             bind.dst.display()
         );
+    }
+    // Printing a plan that cannot be launched and saying nothing is how this
+    // used to surface: as a chdir error, several commands later.
+    if let Err(err) = nspawn::check_supported(&sb) {
+        crate::warn(&format!("{err:#}"));
     }
     Ok(())
 }

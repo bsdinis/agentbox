@@ -156,6 +156,22 @@ check 'ro mount rejects container root too' \
   "$(box sudo -n sh -c "echo x > $REF/NOTES.md 2>/dev/null && echo wrote || echo refused")" refused
 check 'ro mount survived intact' "$(tail -c 9 "$REF/NOTES.md")" 'not edit'
 
+# The one place this suite wants /tmp: a project under a path nspawn covers
+# with a mount of its own cannot be mapped at all, and must be refused before
+# anything is created rather than after the overlay is already mounted.
+UNSUP="$(mktemp -d /tmp/agentbox-unsupported-XXXXXX)"
+unsup_box="$("$AGENTBOX" status --dry-run --dir "$UNSUP" 2>/dev/null | awk '/^box /{print $2}')"
+unsup_out="$("$AGENTBOX" run --dir "$UNSUP" -- true 2>&1)"
+check 'a project under /tmp is refused' \
+  "$(grep -c 'cannot be mapped into a box' <<< "$unsup_out")" 1
+check 'the refusal names the path nspawn owns' \
+  "$(grep -c 'is under /tmp' <<< "$unsup_out")" 1
+check 'the refusal leaves no box behind' \
+  "$(sudo test -e "/var/lib/agentbox/boxes/$unsup_box" && echo left || echo none)" none
+check 'the refusal mounts no rootfs' \
+  "$(findmnt -rno TARGET "/var/lib/machines/$unsup_box" >/dev/null 2>&1 && echo mounted || echo none)" none
+rm -rf "$UNSUP"
+
 echo
 echo '--- persistence and reset ---'
 check 'installed package persists across launches' "$(installed)" installed

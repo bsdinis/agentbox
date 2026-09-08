@@ -220,6 +220,7 @@ pub fn write_settings(sb: &Sandbox) -> Result<()> {
 
 /// Idempotent: safe to call on every launch. Returns true if the box was new.
 pub fn create(sb: &Sandbox) -> Result<bool> {
+    check_supported(sb)?; // before the overlay, so a refusal leaves no state
     let fresh = !sb.dir().exists();
     mount(sb)?; // checks that the base image exists
     if !dry_run() {
@@ -306,23 +307,68 @@ fn getrandom(buf: &mut [u8]) -> Result<()> {
 /// the overlay instead of being a tmpfs. Until one is chosen, say so plainly.
 const NSPAWN_OWNED: [&str; 5] = ["/tmp", "/run", "/dev", "/proc", "/sys"];
 
-fn shadowed_by_nspawn(dst: &Path) -> Option<&'static str> {
+pub fn shadowed_by_nspawn(dst: &Path) -> Option<&'static str> {
     NSPAWN_OWNED.into_iter().find(|base| dst.starts_with(base))
+}
+
+/// Every bind nspawn would shadow, paired with the path it owns. Empty means
+/// the mount plan is launchable.
+pub fn unsupported_binds(sb: &Sandbox) -> Vec<(Bind, &'static str)> {
+    sb.binds()
+        .into_iter()
+        .filter_map(|bind| shadowed_by_nspawn(&bind.dst).map(|base| (bind, base)))
+        .collect()
+}
+
+/// Refuse a plan that cannot work, before anything is mounted or written.
+///
+/// Checked up front rather than when the mount point is prepared, so that a
+/// doomed launch leaves no overlay, box directory or settings file behind, and
+/// so that `status` and `--dry-run` can report the same thing without creating
+/// anything at all.
+pub fn check_supported(sb: &Sandbox) -> Result<()> {
+    let unsupported = unsupported_binds(sb);
+    if unsupported.is_empty() {
+        return Ok(());
+    }
+    let mut msg = String::from("this project cannot be mapped into a box:\n");
+    for (bind, base) in &unsupported {
+        let what = if bind.dst == sb.project {
+            "the project directory"
+        } else {
+            "mapped directory"
+        };
+        msg.push_str(&format!(
+            "  {what} {} is under {base}\n",
+            bind.dst.display()
+        ));
+    }
+    msg.push_str(
+        "systemd-nspawn covers /tmp, /run, /dev, /proc and /sys with mounts of\n\
+         its own, applied before the binds, so a mount point below one of them\n\
+         is hidden and the sandbox user never ends up owning it.\n",
+    );
+    if unsupported.iter().any(|(bind, _)| bind.dst == sb.project) {
+        msg.push_str("Move the project somewhere else.\n");
+    }
+    if unsupported.iter().any(|(bind, _)| bind.dst != sb.project) {
+        msg.push_str(
+            "Give the mapping a destination of its own, as in\n\
+             `ro = [\"/tmp/sysroot:/sysroot\"]`.\n",
+        );
+    }
+    msg.push_str("docs/troubleshooting.md has the long version.");
+    bail!("{msg}")
 }
 
 /// `owneridmap` maps the host owner of the source onto *the owner of the
 /// destination inside the container*, so the mount point has to exist first,
 /// owned by the right container user.
 fn prepare_mount_point(sb: &Sandbox, bind: &Bind) -> Result<()> {
-    if let Some(base) = shadowed_by_nspawn(&bind.dst) {
-        bail!(
-            "cannot map {} at {} inside the box: systemd-nspawn mounts its own \
-             {base} there, which hides the mount point agentbox prepares, so \
-             the sandbox user would not own it. Use a path outside {base}.",
-            bind.src.display(),
-            bind.dst.display(),
-        );
-    }
+    debug_assert!(
+        shadowed_by_nspawn(&bind.dst).is_none(),
+        "check_supported was skipped"
+    );
     let target = sb.inside(&bind.dst);
     let meta =
         fs::metadata(&bind.src).with_context(|| format!("cannot stat {}", bind.src.display()))?;
