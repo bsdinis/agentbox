@@ -86,7 +86,8 @@ so refresh, then `agentbox reset` a box if you want it to pick everything up.
 $ ~/dev/agentbox/tests/verify.sh
 ```
 
-A throwaway project under `/tmp` is created, exercised and removed. Every
+A throwaway project under `$XDG_CACHE_HOME` is created, exercised and removed
+(`AGENTBOX_VERIFY_ROOT` moves it; `/tmp` will not work, see below). Every
 assertion maps to a promise in the README, so a failure names the thing that is
 broken (`ro mount rejects container root too`, `container root maps to an
 unprivileged host uid`, and so on). `KEEP=1` keeps the box for inspection.

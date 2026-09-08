@@ -54,12 +54,24 @@ want if you later add the passwordless-sudo rule from
 $ tests/verify.sh
 ```
 
-Creates a throwaway project in `/tmp`, then asserts the four promises above:
-it installs a package inside the box, checks that container `root` maps to an
+Creates a throwaway project under `$XDG_CACHE_HOME`, then asserts the
+promises above: it
+installs a package inside the box, checks that container `root` maps to an
 unprivileged host UID and cannot reach the host `/etc`, makes a git commit and
-a jj operation on the mapped repo, and confirms `ro` mounts reject writes even
-from container root. Ends with a pass/fail count. `KEEP=1 tests/verify.sh`
-leaves the box behind to poke at.
+a jj operation on the mapped repo, confirms `ro` mounts reject writes even from
+container root, and checks resource limits, booted mode and network modes. It
+also asserts that the privilege handover leaves no environment file behind and
+that `AGENTBOX_STATE` cannot redirect a privileged run, and finishes by
+asserting that the host's own mounts are all still there. Ends with
+a pass/fail count. `KEEP=1 tests/verify.sh` leaves the box behind to poke at.
+
+```console
+$ WITH_BUILD=1 tests/verify.sh
+```
+
+adds a full `agentbox build` into a throwaway state directory, so the build
+path is covered too. It takes a few minutes and downloads packages, which is
+why it is opt-in; the real base image is never touched.
 
 ## Commands
 
