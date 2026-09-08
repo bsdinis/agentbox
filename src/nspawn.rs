@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 use crate::argv;
 use crate::config::{Network, UID_RANGE};
 use crate::host::{dry_run, sh};
-use crate::sandbox::{Bind, Sandbox, NSPAWN_DIR, STATE};
+use crate::sandbox::{Bind, Sandbox, NSPAWN_DIR};
 use crate::{base, info};
 
 // --------------------------------------------------------------------------
@@ -327,9 +327,7 @@ pub fn exec_in(
     sh(launch_argv(sb, cmd, user, chdir)).quiet().exec()
 }
 
-pub fn state_dir() -> &'static Path {
-    Path::new(STATE)
-}
+pub use crate::sandbox::state_dir;
 
 #[cfg(test)]
 mod tests {

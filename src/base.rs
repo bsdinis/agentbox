@@ -10,11 +10,11 @@ use anyhow::{bail, Context, Result};
 use crate::argv;
 use crate::config::{self, UID_RANGE};
 use crate::host::{dry_run, host, oss, sh};
-use crate::sandbox::STATE;
+use crate::sandbox::state_dir;
 use crate::info;
 
 pub fn image() -> PathBuf {
-    Path::new(STATE).join("base")
+    state_dir().join("base")
 }
 
 pub fn require() -> Result<()> {
@@ -152,7 +152,7 @@ fn bootstrap(base: &Path) -> Result<()> {
     }
     info(&format!("bootstrapping Arch into {}", base.display()));
 
-    let state = Path::new(STATE);
+    let state = state_dir();
     let conf = state.join("pacman-build.conf");
     if !dry_run() {
         fs::create_dir_all(state.join("boxes"))?;
@@ -181,9 +181,47 @@ fn bootstrap(base: &Path) -> Result<()> {
     }
 
     // Install scriptlets expect the kernel filesystems, as in a chroot.
+    //
+    // Each rbind is immediately made rslave. Without that the copied submounts
+    // join the *peer group* of the host's own mounts - / is shared under
+    // systemd - and the `umount -R` below propagates back out, tearing
+    // /dev/pts, /dev/shm and /run/user/$UID off the running host. rslave lets
+    // host mount events propagate inwards while nothing propagates outwards.
     let api = ["proc", "sys", "dev", "run"];
+    let mut mounted: Vec<PathBuf> = Vec::new();
     for dir in api {
-        sh(argv!["mount", "--rbind", format!("/{dir}"), base.join(dir)]).quiet().run()?;
+        let target = base.join(dir);
+        let bind = sh(argv!["mount", "--rbind", format!("/{dir}"), &target])
+            .quiet()
+            .run();
+        if let Err(err) = bind {
+            unmount_api(&mounted);
+            return Err(err);
+        }
+        let detached = sh(argv!["mount", "--make-rslave", &target])
+            .quiet()
+            .run()
+            .and_then(|_| assert_detached(&target));
+        if let Err(err) = detached {
+            // `target` is deliberately left behind. It is the one subtree we
+            // could not prove is detached, and `umount -R` on a still-shared
+            // bind is precisely what tears /dev/pts and /run/user/$UID off the
+            // running host - the failure this whole dance exists to prevent.
+            // A leaked bind under the image costs a reboot; propagating the
+            // teardown costs the session.
+            unmount_api(&mounted);
+            return Err(err).with_context(|| {
+                format!(
+                    "cannot detach {} from host mount propagation; it was left \
+                     mounted deliberately, since unmounting a shared bind would \
+                     tear filesystems off the running host",
+                    target.display()
+                )
+            });
+        }
+        // Only now is it safe to tear down: everything in `mounted` is known
+        // rslave, so `umount -R` on it cannot reach the host.
+        mounted.push(target);
     }
     let result = sh(argv![
         "pacman",
@@ -202,10 +240,65 @@ fn bootstrap(base: &Path) -> Result<()> {
         "archlinux-keyring"
     ])
     .run();
-    for dir in api.iter().rev() {
-        let _ = sh(argv!["umount", "-R", "-l", base.join(dir)]).quiet().silent().allow_fail().run();
-    }
+    unmount_api(&mounted);
     result.map(|_| ())
+}
+
+/// One `KEY="value"` field out of a `findmnt -P` line. That format is used in
+/// preference to columns because findmnt escapes quotes and spaces inside the
+/// values, so a mount point containing a space cannot shift the parse.
+fn findmnt_field<'a>(line: &'a str, key: &str) -> Option<&'a str> {
+    let start = line.find(&format!("{key}=\""))? + key.len() + 2;
+    let rest = &line[start..];
+    Some(&rest[..rest.find('"')?])
+}
+
+/// The first still-shared mount in `findmnt -R -n -P -o TARGET,PROPAGATION`
+/// output, if any. A shared mount is one whose teardown propagates to its peers
+/// - which, for a bind of a host subtree, means the host's own mounts.
+fn first_shared(findmnt_output: &str) -> Option<&str> {
+    findmnt_output.lines().find(|line| {
+        findmnt_field(line, "PROPAGATION")
+            .is_some_and(|flags| flags.split(',').any(|f| f == "shared"))
+    })
+}
+
+/// `mount --make-rslave` reporting success is not proof it took effect, and the
+/// cost of being wrong is the host losing /dev/pts and /run/user/$UID when the
+/// teardown runs. Read the propagation flags back and refuse to go on if any
+/// mount in the subtree is still shared.
+fn assert_detached(target: &Path) -> Result<()> {
+    if dry_run() {
+        return Ok(());
+    }
+    let out = sh(argv!["findmnt", "-R", "-n", "-P", "-o", "TARGET,PROPAGATION", target])
+        .quiet()
+        .output();
+    if out.is_empty() {
+        bail!(
+            "cannot read mount propagation for {}; refusing to continue, tearing down \
+             a shared mount would unmount the host's own filesystems",
+            target.display()
+        );
+    }
+    if let Some(line) = first_shared(&out) {
+        bail!(
+            "{} is still shared after --make-rslave ({}); refusing to continue, \
+             unmounting it would tear filesystems off the running host",
+            target.display(),
+            findmnt_field(line, "TARGET").unwrap_or(line)
+        );
+    }
+    Ok(())
+}
+
+/// Tear down the bootstrap API mounts, innermost first. Every path passed in
+/// must already have been proved detached by `assert_detached`: `umount -R` on
+/// a still-shared subtree is what unmounts the host's own filesystems.
+fn unmount_api(mounted: &[PathBuf]) {
+    for target in mounted.iter().rev() {
+        let _ = sh(argv!["umount", "-R", "-l", target]).quiet().silent().allow_fail().run();
+    }
 }
 
 /// Stage 3: make the image a usable dev box for the invoking user. The sandbox
@@ -239,4 +332,63 @@ chmod 440 /etc/sudoers.d/10-agentbox-env
 
 fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::first_shared;
+
+    /// `findmnt -R -n -P -o TARGET,PROPAGATION` output, one mount per line.
+    fn findmnt(mounts: &[(&str, &str)]) -> String {
+        use std::fmt::Write as _;
+        let mut out = String::new();
+        for (target, prop) in mounts {
+            let _ = writeln!(out, "TARGET=\"{target}\" PROPAGATION=\"{prop}\"");
+        }
+        out
+    }
+
+    fn target_of(line: &str) -> &str {
+        super::findmnt_field(line, "TARGET").unwrap()
+    }
+
+    #[test]
+    fn detects_a_shared_mount_anywhere_in_the_subtree() {
+        let out = findmnt(&[
+            ("/base/dev", "private"),
+            ("/base/dev/pts", "shared"),
+            ("/base/dev/shm", "private"),
+        ]);
+        assert_eq!(first_shared(&out).map(target_of), Some("/base/dev/pts"));
+    }
+
+    #[test]
+    fn a_fully_detached_subtree_is_accepted() {
+        let out = findmnt(&[("/base/run", "private"), ("/base/run/user/1000", "slave")]);
+        assert_eq!(first_shared(&out), None);
+    }
+
+    #[test]
+    fn shared_and_slave_together_still_propagates_outwards() {
+        let out = findmnt(&[("/base/run", "shared,slave")]);
+        assert_eq!(first_shared(&out).map(target_of), Some("/base/run"));
+    }
+
+    #[test]
+    fn a_target_merely_containing_the_word_is_not_a_match() {
+        let out = findmnt(&[("/base/shared-things", "private"), ("/base/unshared", "private")]);
+        assert_eq!(first_shared(&out), None);
+    }
+
+    /// The reason for parsing `KEY="value"` rather than whitespace columns.
+    #[test]
+    fn a_mount_point_containing_a_space_does_not_shift_the_parse() {
+        let out = findmnt(&[("/base/my code", "private"), ("/base/other dir", "shared")]);
+        assert_eq!(first_shared(&out).map(target_of), Some("/base/other dir"));
+    }
+
+    #[test]
+    fn a_line_without_a_propagation_field_is_not_treated_as_shared() {
+        assert_eq!(first_shared("TARGET=\"/base/dev\"\n"), None);
+    }
 }

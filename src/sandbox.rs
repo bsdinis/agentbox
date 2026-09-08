@@ -2,15 +2,34 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use sha2::{Digest, Sha256};
 
 use crate::config::{expand, Config, UID_RANGE};
 use crate::host::{env_var, host, User};
 
+/// Default root for the base image and per-box overlays.
 pub const STATE: &str = "/var/lib/agentbox";
 pub const MACHINES: &str = "/var/lib/machines";
 pub const NSPAWN_DIR: &str = "/etc/systemd/nspawn";
+
+/// Where the base image and the boxes live.
+///
+/// `AGENTBOX_STATE` relocates it so a test can build a throwaway image without
+/// touching the real one. It is read from *this* process's environment rather
+/// than the caller's handover, so it is stripped by `sudo`'s env_reset on the
+/// way to root and cannot be used to aim a privileged agentbox somewhere new.
+/// Tests reach it with `sudo env AGENTBOX_STATE=... agentbox build`.
+pub fn state_dir() -> &'static Path {
+    static DIR: OnceLock<PathBuf> = OnceLock::new();
+    DIR.get_or_init(|| {
+        std::env::var_os("AGENTBOX_STATE")
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .unwrap_or_else(|| PathBuf::from(STATE))
+    })
+}
 
 /// One host directory made visible inside the box.
 #[derive(Debug, Clone)]
@@ -53,7 +72,7 @@ impl Sandbox {
     }
 
     pub fn dir(&self) -> PathBuf {
-        Path::new(STATE).join("boxes").join(&self.name)
+        state_dir().join("boxes").join(&self.name)
     }
 
     /// Everything the container has ever written.

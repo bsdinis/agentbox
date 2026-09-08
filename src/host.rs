@@ -125,6 +125,41 @@ impl Handover {
     }
 }
 
+/// A directory we can actually create a file in, not merely one that exists.
+fn writable_dir(path: &Path) -> bool {
+    if !path.is_dir() {
+        return false;
+    }
+    let Ok(cstr) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+        return false;
+    };
+    // SAFETY: cstr outlives the call and is a valid NUL-terminated string.
+    unsafe { libc::access(cstr.as_ptr(), libc::W_OK | libc::X_OK) == 0 }
+}
+
+/// The handover file is normally eaten by the child process, but a `sudo` that
+/// never authenticates leaves it behind - carrying the caller's environment,
+/// tokens included. In a runtime directory that is merely untidy; in $HOME it
+/// persists across reboots, so drop any left by a process that is gone.
+fn sweep_stale_handovers(dir: &Path) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(pid) = name
+            .to_str()
+            .and_then(|n| n.strip_prefix(".agentbox-handover-"))
+            .and_then(|n| n.strip_suffix(".json"))
+        else {
+            continue;
+        };
+        if !Path::new("/proc").join(pid).exists() {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+}
+
 /// Re-exec ourselves under sudo, carrying the caller's environment in a 0600
 /// file. `sudo VAR=x` is rejected by default sudoers and argv is world-readable
 /// through /proc, but the environment may hold API tokens bound for `pass_env`.
@@ -133,15 +168,22 @@ pub fn ensure_root() -> Result<()> {
         return Ok(());
     }
     let uid = unsafe { libc::getuid() };
-    let runtime = std::env::var_os("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .filter(|p| p.is_dir())
-        .unwrap_or_else(|| PathBuf::from(format!("/run/user/{uid}")));
-    let dir = if runtime.is_dir() {
-        runtime
-    } else {
-        PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
-    };
+    // Existing is not the same as usable: a runtime directory can be present
+    // but unwritable (a session that never got one, a damaged /run/user), so
+    // fall through to the next candidate rather than failing outright.
+    let dir = [
+        std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from),
+        Some(PathBuf::from(format!("/run/user/{uid}"))),
+        std::env::var_os("HOME").map(PathBuf::from),
+    ]
+    .into_iter()
+    .flatten()
+    .find(|p| writable_dir(p))
+    .context(
+        "no writable directory for the handover file \
+         (tried $XDG_RUNTIME_DIR, /run/user/$UID, $HOME)",
+    )?;
+    sweep_stale_handovers(&dir);
     let path = dir.join(format!(".agentbox-handover-{}.json", std::process::id()));
 
     let handover = Handover {
