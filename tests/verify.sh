@@ -14,10 +14,11 @@
 #   WITH_BUILD=1 ~/dev/agentbox/tests/verify.sh # also exercise `agentbox build`
 #
 # WITH_BUILD is opt-in because it builds a second Arch image from scratch (a few
-# minutes, and it downloads packages). It is the only section that covers the
-# build path, which is where a mount-propagation bug once unmounted /dev/pts and
-# /run/user/$UID off the host. It builds into a throwaway AGENTBOX_STATE, so the
-# real base image is never touched.
+# minutes, ~3G, and it downloads whatever the host package cache is missing). It
+# is the only section that covers the build path, which is where a mount
+# propagation bug once unmounted /dev/pts and /run/user/$UID off the host. It
+# builds into a throwaway AGENTBOX_STATE, so the real base image is never
+# touched, and leaves the build log behind for a post-mortem.
 set -uo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -287,24 +288,49 @@ check 'nothing was created in the decoy state dir' \
 if [[ -n "${WITH_BUILD:-}" ]]; then
   echo
   echo '--- 10. the build path, in a throwaway state directory ---'
-  BSTATE="$(mktemp -d "$root/agentbox-buildstate-XXXXXX")"
-  echo "building into $BSTATE (a few minutes)"
-  # `sudo env VAR=...` rather than `sudo VAR=...`: the latter is refused by
-  # default sudoers. Running the build already-root means AGENTBOX_STATE is read
-  # from this process rather than being stripped on the way through sudo.
-  sudo env AGENTBOX_STATE="$BSTATE" "$AGENTBOX" build --force >/dev/null 2>&1
-  check 'build succeeded' "$?" 0
-  check 'build left every host mount in place' "$(lost_mounts)" 'none lost'
-  check 'the real base image was untouched' \
-    "$([[ -e "$BSTATE/base" && "$BSTATE" != /var/lib/agentbox ]] && echo isolated)" isolated
-  check 'keyring was initialised' \
-    "$(sudo test -d "$BSTATE/base/etc/pacman.d/gnupg" && echo yes || echo no)" yes
-  check 'git is in the image'  "$(sudo test -x "$BSTATE/base/usr/bin/git" && echo yes || echo no)" yes
-  check 'jj is in the image'   "$(sudo test -x "$BSTATE/base/usr/bin/jj"  && echo yes || echo no)" yes
-  check 'sudoers rule was written' \
-    "$(sudo test -f "$BSTATE/base/etc/sudoers.d/00-agentbox" && echo yes || echo no)" yes
-  check 'image ownership was shifted out of the host root range' \
-    "$(sudo stat -c %u "$BSTATE/base/usr/bin/bash" 2>/dev/null)" "$UIDBASE"
+  avail_mb=$(( $(df -Pk "$root" | awk 'NR == 2 {print $4}') / 1024 ))
+  if (( avail_mb < 3072 )); then
+    # A build that runs out of space part way leaves a half-populated image,
+    # which fails much later and far less legibly - as a box whose useradd
+    # never ran. Say it up front instead.
+    no "need ~3G under $root for a throwaway image, have ${avail_mb}M"
+  else
+    BSTATE="$(mktemp -d "$root/agentbox-buildstate-XXXXXX")"
+    buildlog="$root/agentbox-build.log"
+    echo "building into $BSTATE (a few minutes; log in $buildlog)"
+    # `agentbox build --force` deletes the image it is aimed at, so the
+    # isolation here is load-bearing: snapshot the real image and prove the
+    # build never reached it.
+    realbase="$(stat -c '%i %Y' /var/lib/agentbox/base 2>/dev/null || echo absent)"
+    # `sudo env VAR=...` rather than `sudo VAR=...`: the latter is refused by
+    # default sudoers. Running the build already-root means AGENTBOX_STATE is
+    # read from this process rather than being stripped on the way through sudo.
+    sudo env AGENTBOX_STATE="$BSTATE" "$AGENTBOX" build --force >"$buildlog" 2>&1
+    rc=$?
+    check 'build succeeded' "$rc" 0
+    (( rc == 0 )) || { echo "--- tail of $buildlog ---"; tail -20 "$buildlog"; }
+    check 'build left every host mount in place' "$(lost_mounts)" 'none lost'
+    # The bootstrap rbinds /proc, /sys, /dev and /run into the half-built image
+    # and tears them down again. Anything still mounted under it means either
+    # the teardown failed or the guard refused to unmount a still-shared
+    # subtree and left it behind deliberately - both worth knowing about.
+    check 'the bootstrap binds were torn down' \
+      "$(findmnt -rno TARGET | awk -v p="$BSTATE/base/" 'index($0, p) == 1' | wc -l)" 0
+    check 'the real base image was untouched' \
+      "$(stat -c '%i %Y' /var/lib/agentbox/base 2>/dev/null || echo absent)" "$realbase"
+    check 'keyring was initialised' \
+      "$(sudo test -d "$BSTATE/base/etc/pacman.d/gnupg" && echo yes || echo no)" yes
+    check 'git is in the image'  "$(sudo test -x "$BSTATE/base/usr/bin/git" && echo yes || echo no)" yes
+    check 'jj is in the image'   "$(sudo test -x "$BSTATE/base/usr/bin/jj"  && echo yes || echo no)" yes
+    check 'sudoers rule was written' \
+      "$(sudo test -f "$BSTATE/base/etc/sudoers.d/00-agentbox" && echo yes || echo no)" yes
+    # The image the crash left behind stopped just short of this, and every
+    # later failure was a box whose chsh could not find the user.
+    check 'the sandbox user is in the image' \
+      "$(sudo grep -c "^$USER:" "$BSTATE/base/etc/passwd" 2>/dev/null)" 1
+    check 'image ownership was shifted out of the host root range' \
+      "$(sudo stat -c %u "$BSTATE/base/usr/bin/bash" 2>/dev/null)" "$UIDBASE"
+  fi
 fi
 
 echo
