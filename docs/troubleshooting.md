@@ -147,6 +147,20 @@ the rootfs mounted at `/var/lib/machines/<box>`. Run `agentbox shell` once
 first: it mounts the overlay and writes the settings file that booted mode
 depends on.
 
+If the journal shows the box getting as far as its banner and then
+
+```
+Failed to create /init.scope control group: Permission denied
+Failed to allocate manager object: Permission denied
+```
+
+then PID 1 is not running as container root — a `User=` in
+`/etc/systemd/nspawn/<box>.nspawn` will do it, since that setting names the
+user for the container's *main* process, which in booted mode is systemd
+itself. agentbox no longer writes one, and the file is regenerated on every
+launch, so a single `agentbox shell` clears a stale one left by an older
+version.
+
 ## `machinectl shell` says the machine is unknown
 
 `agentbox shell` runs with `--register=no`, so direct-mode boxes deliberately

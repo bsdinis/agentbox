@@ -87,7 +87,8 @@ $ ~/dev/agentbox/tests/verify.sh
 ```
 
 A throwaway project under `$XDG_CACHE_HOME` is created, exercised and removed
-(`AGENTBOX_VERIFY_ROOT` moves it; `/tmp` will not work, see below). Every
+(`AGENTBOX_VERIFY_ROOT` moves it, though not to `/tmp`, which nspawn cannot
+map into a box — see [usage.md](usage.md#mapping-directories)). Every
 assertion maps to a promise in the README, so a failure names the thing that is
 broken (`ro mount rejects container root too`, `container root maps to an
 unprivileged host uid`, and so on). `KEEP=1` keeps the box for inspection.

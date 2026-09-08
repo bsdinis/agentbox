@@ -56,6 +56,10 @@ under a `[defaults]` table; both work, and `[defaults]` is clearer.
   absolute paths are what make relative path dependencies work.
 * Destinations are created inside the box if missing, owned by the sandbox
   user, because `owneridmap` derives the mapping from the destination's owner.
+* Destinations under `/tmp`, `/run`, `/dev`, `/proc` or `/sys` are refused:
+  systemd-nspawn mounts its own filesystem over each of those, after which the
+  prepared destination is hidden and its ownership no longer ours to set. A
+  project directory under one of them cannot be boxed at all.
 * The project directory is always mounted read-write and cannot be dropped.
   If you list it again explicitly the first entry wins.
 * Nonexistent sources are skipped with a warning.
@@ -125,3 +129,4 @@ it in `.agentbox.toml`.
 | `/var/lib/agentbox/boxes/<box>/meta.json` | Project path, UID base, network mode. |
 | `/var/lib/machines/<box>` | Mount point of the assembled rootfs. |
 | `/etc/systemd/nspawn/<box>.nspawn` | Generated settings. Regenerated on every launch — edit the TOML, not this. |
+| `/etc/systemd/system/systemd-nspawn@<box>.service.d/` | Generated drop-in carrying the resource caps for booted mode. Removed by `agentbox rm`. |

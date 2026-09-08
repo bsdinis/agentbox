@@ -31,6 +31,17 @@ after `--` is the command line, so quoting works normally:
 $ agentbox run -- bash -lc 'cd src && make -j8 2>&1 | tail -40'
 ```
 
+A redirected `run` is a normal pipeline component: when its input or output is
+not a terminal it hands the box the file descriptors as they are, so output
+comes back byte for byte, stderr stays separate from stdout, and EOF crosses
+the pipe in both directions.
+
+```console
+$ agentbox run -- cargo metadata --format-version 1 | jq -r .packages[].name
+$ git diff | agentbox run -- git apply -
+$ agentbox run -- ./flaky-test 2>errors.log
+```
+
 ## Installing packages
 
 Just do it. The box has a working keyring and its own writable `/usr`.
@@ -133,6 +144,12 @@ Rules:
   resolve because the layout on both sides is identical.
 * Read-only really is read-only: the mount is `BindReadOnly=`, enforced by the
   kernel, not by permissions the container root could change.
+* Destinations under `/tmp`, `/run`, `/dev`, `/proc` or `/sys` are refused.
+  systemd-nspawn covers each of those with a mount of its own, so a bind
+  underneath it would be hidden and end up owned by container root rather than
+  by you. This applies to the project directory too: a project living under
+  `/tmp` cannot be put in a box. Move it, or map it to a destination elsewhere
+  with `~/scratch:/scratch`-style syntax.
 * Sources that do not exist are skipped with a warning rather than failing.
 * One-off maps without editing config: `--map` (ro) and `--rw-map` (rw),
   repeatable.
@@ -172,7 +189,7 @@ host's interfaces. In `nat` mode they are left enabled.
 
 ## Resource limits
 
-Applied to the container's systemd scope, so they are real cgroup limits:
+Real cgroup limits, not advisory:
 
 ```toml
 memory_max = "16G"
@@ -181,7 +198,18 @@ tasks_max  = "4096"
 ```
 
 A runaway `make -j$(nproc)` or a memory-leaking test then hits a wall instead
-of your host.
+of your host. They apply to every way a box can be launched: `run` and `shell`
+put the container in a transient scope carrying the caps, and `up` gets them
+from a drop-in on its unit.
+
+To see them in force, look from the host rather than from inside — the box's
+own `/sys/fs/cgroup` is a subgroup below the capped one, so it reads `max`:
+
+```console
+$ agentbox run -- sleep 60 &
+$ systemd-cgls                     # find the run-*.scope the box sits in
+$ systemctl show -p MemoryMax -p CPUQuotaPerSecUSec -p TasksMax run-<id>.scope
+```
 
 ## Booted mode
 
@@ -198,7 +226,9 @@ $ agentbox down                # poweroff
 ```
 
 Both modes read the same generated `/etc/systemd/nspawn/<box>.nspawn`, so the
-mounts, UID map and network mode are identical either way.
+mounts, UID map and network mode are identical either way. Who you are is not
+in that file: a booted box starts systemd as container root, as PID 1 must be,
+and `agentbox enter` logs you in as yourself afterwards.
 
 ## Running agents inside
 

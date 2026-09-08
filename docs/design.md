@@ -102,6 +102,20 @@ Two consequences worth knowing:
   precedence, our `PrivateUsers=` and `[Network]` settings take effect anyway,
   and booted mode ends up identical to direct mode.
 
+The flip side of one file serving both modes is that nothing describing a
+single *payload* may go in it. `User=` names the user to invoke the container's
+main process as, and for a booted box that process is systemd itself: setting
+it there gave PID 1 the sandbox user's UID, no way to create `/init.scope`, and
+a container that died a second after `agentbox up` reported success. `User=`
+and `WorkingDirectory=` are passed on the command line by the launches that
+want them, and the file carries only what is true of the box however it starts.
+
+Resource caps are the mirror image. They are properties of a *unit*, which the
+file cannot express at all: nspawn's `--property=` needs a unit to land on, and
+with `--register=no` a direct launch simply inherits the caller's cgroup. So
+direct launches run inside a transient `systemd-run --scope` carrying the caps,
+and booted boxes get a drop-in on their `systemd-nspawn@` instance.
+
 The file is regenerated from the TOML on every launch, so editing it by hand is
 pointless.
 

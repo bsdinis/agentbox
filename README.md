@@ -115,6 +115,7 @@ State on disk:
 /var/lib/agentbox/boxes/<box>/meta.json project path, UID range, network mode
 /var/lib/machines/<box>                 the assembled rootfs (so machinectl sees it)
 /etc/systemd/nspawn/<box>.nspawn        generated settings: binds, UID map, network
+/etc/systemd/system/systemd-nspawn@<box>.service.d/  resource caps for booted mode
 ```
 
 ## Caveats
@@ -124,3 +125,8 @@ mistakes, and a reasonable one against hostile code, but it is a shared-kernel
 container, not a VM. If you are running something you actively expect to attack
 you, use a VM. See [docs/design.md](docs/design.md#security-model) for the
 specifics of what is and is not isolated.
+
+One limitation worth knowing before you point it at a project: directories
+under `/tmp`, `/run`, `/dev`, `/proc` and `/sys` cannot be mapped into a box,
+because systemd-nspawn mounts its own filesystem over each of them. A project
+has to live somewhere else.
