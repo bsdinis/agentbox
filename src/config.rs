@@ -23,7 +23,7 @@ pub const DEFAULT_BASE_PACKAGES: &[&str] = &[
     "git", "jujutsu", "github-cli", "git-lfs",
     "curl", "wget", "rsync", "unzip", "zstd", "jq",
     "vim", "less", "man-db", "tree", "which", "diffutils", "inetutils",
-    "procps-ng", "strace", "tmux", "ripgrep", "fd", "fzf",
+    "procps-ng", "strace", "tmux", "ripgrep", "fd", "fzf", "iputils",
     "python", "python-pip", "nodejs", "npm",
     "bash-completion", "fish",
 ];
