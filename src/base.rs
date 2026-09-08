@@ -10,8 +10,8 @@ use anyhow::{bail, Context, Result};
 use crate::argv;
 use crate::config::{self, UID_RANGE};
 use crate::host::{dry_run, host, oss, sh};
-use crate::sandbox::state_dir;
 use crate::info;
+use crate::sandbox::state_dir;
 
 pub fn image() -> PathBuf {
     state_dir().join("base")
@@ -22,7 +22,10 @@ pub fn require() -> Result<()> {
         return Ok(());
     }
     if dry_run() {
-        crate::warn(&format!("no base image at {} yet (dry run continues)", image().display()));
+        crate::warn(&format!(
+            "no base image at {} yet (dry run continues)",
+            image().display()
+        ));
         return Ok(());
     }
     bail!("no base image yet - run `agentbox build` first");
@@ -113,7 +116,10 @@ pub fn build(refresh: bool, force: bool) -> Result<()> {
         false,
     )?;
 
-    info(&format!("installing {} packages inside the image", packages.len()));
+    info(&format!(
+        "installing {} packages inside the image",
+        packages.len()
+    ));
     let mut cmd = argv!["/usr/bin/pacman", "-Sy", "--noconfirm", "--needed"];
     cmd.extend(packages.iter().map(oss));
     in_image(cmd, None, true)?;
@@ -176,8 +182,11 @@ fn bootstrap(base: &Path) -> Result<()> {
             base.join("tmp"),
             std::os::unix::fs::PermissionsExt::from_mode(0o1777),
         )?;
-        fs::copy("/etc/pacman.d/mirrorlist", base.join("etc/pacman.d/mirrorlist"))
-            .context("cannot copy the host mirrorlist")?;
+        fs::copy(
+            "/etc/pacman.d/mirrorlist",
+            base.join("etc/pacman.d/mirrorlist"),
+        )
+        .context("cannot copy the host mirrorlist")?;
     }
 
     // Install scriptlets expect the kernel filesystems, as in a chroot.
@@ -271,9 +280,17 @@ fn assert_detached(target: &Path) -> Result<()> {
     if dry_run() {
         return Ok(());
     }
-    let out = sh(argv!["findmnt", "-R", "-n", "-P", "-o", "TARGET,PROPAGATION", target])
-        .quiet()
-        .output();
+    let out = sh(argv![
+        "findmnt",
+        "-R",
+        "-n",
+        "-P",
+        "-o",
+        "TARGET,PROPAGATION",
+        target
+    ])
+    .quiet()
+    .output();
     if out.is_empty() {
         bail!(
             "cannot read mount propagation for {}; refusing to continue, tearing down \
@@ -297,7 +314,11 @@ fn assert_detached(target: &Path) -> Result<()> {
 /// a still-shared subtree is what unmounts the host's own filesystems.
 fn unmount_api(mounted: &[PathBuf]) {
     for target in mounted.iter().rev() {
-        let _ = sh(argv!["umount", "-R", "-l", target]).quiet().silent().allow_fail().run();
+        let _ = sh(argv!["umount", "-R", "-l", target])
+            .quiet()
+            .silent()
+            .allow_fail()
+            .run();
     }
 }
 
@@ -376,7 +397,10 @@ mod tests {
 
     #[test]
     fn a_target_merely_containing_the_word_is_not_a_match() {
-        let out = findmnt(&[("/base/shared-things", "private"), ("/base/unshared", "private")]);
+        let out = findmnt(&[
+            ("/base/shared-things", "private"),
+            ("/base/unshared", "private"),
+        ]);
         assert_eq!(first_shared(&out), None);
     }
 

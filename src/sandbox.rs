@@ -60,16 +60,23 @@ pub struct Sandbox {
 
 impl Sandbox {
     pub fn new(project: PathBuf, cfg: Config) -> Self {
-        let stem = sanitize(
-            cfg.name
-                .clone()
-                .unwrap_or_else(|| project.file_name().unwrap_or_default().to_string_lossy().into_owned()),
-        );
+        let stem = sanitize(cfg.name.clone().unwrap_or_else(|| {
+            project
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned()
+        }));
         // The path hash keeps two projects with the same directory name apart.
         let digest = Sha256::digest(project.as_os_str().as_encoded_bytes());
         let mut name = format!("{stem}-{:x}", digest);
         name.truncate(stem.len() + 7);
-        Sandbox { name, project, cfg, user: host().user.clone() }
+        Sandbox {
+            name,
+            project,
+            cfg,
+            user: host().user.clone(),
+        }
     }
 
     pub fn dir(&self) -> PathBuf {
@@ -104,7 +111,10 @@ impl Sandbox {
     }
 
     pub fn hostname(&self) -> String {
-        self.cfg.hostname.clone().unwrap_or_else(|| self.name.clone())
+        self.cfg
+            .hostname
+            .clone()
+            .unwrap_or_else(|| self.name.clone())
     }
 
     /// Host UID corresponding to a UID inside the container.
@@ -146,7 +156,11 @@ impl Sandbox {
                     continue;
                 }
                 claimed.push(dst.clone());
-                binds.push(Bind { read_only, src, dst });
+                binds.push(Bind {
+                    read_only,
+                    src,
+                    dst,
+                });
             }
         }
 
@@ -186,7 +200,8 @@ impl Sandbox {
             let sock = self.ssh_agent_dst();
             env.insert("SSH_AUTH_SOCK".into(), sock.display().to_string());
         }
-        env.entry("AGENTBOX".into()).or_insert_with(|| self.name.clone());
+        env.entry("AGENTBOX".into())
+            .or_insert_with(|| self.name.clone());
         env
     }
 
@@ -224,7 +239,13 @@ fn split_spec(spec: &str) -> (String, Option<String>) {
 fn sanitize(name: String) -> String {
     let cleaned: String = name
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
         .collect();
     let trimmed: Vec<&str> = cleaned.split('-').filter(|s| !s.is_empty()).collect();
     let joined = trimmed.join("-");
@@ -245,7 +266,10 @@ mod tests {
         assert_eq!(split_spec("/a:/b"), ("/a".into(), Some("/b".into())));
         assert_eq!(split_spec("/a:/b:/c"), ("/a".into(), Some("/b:/c".into())));
         assert_eq!(split_spec(r"/wei\:rd"), (r"/wei:rd".into(), None));
-        assert_eq!(split_spec(r"/wei\:rd:/dst"), ("/wei:rd".into(), Some("/dst".into())));
+        assert_eq!(
+            split_spec(r"/wei\:rd:/dst"),
+            ("/wei:rd".into(), Some("/dst".into()))
+        );
     }
 
     #[test]

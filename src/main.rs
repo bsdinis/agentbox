@@ -187,7 +187,10 @@ struct RunArgs {
 
 impl RunArgs {
     fn overrides(&self) -> Overrides {
-        Overrides { packages: self.packages.clone(), ..self.target.overrides() }
+        Overrides {
+            packages: self.packages.clone(),
+            ..self.target.overrides()
+        }
     }
 }
 

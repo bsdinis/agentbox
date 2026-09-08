@@ -19,13 +19,42 @@ pub const UID_BASE_DEFAULT: u32 = 1_310_720_000;
 
 /// Packages baked into the shared base image.
 pub const DEFAULT_BASE_PACKAGES: &[&str] = &[
-    "base", "base-devel", "sudo", "openssh", "ca-certificates", "gnupg",
-    "git", "jujutsu", "github-cli", "git-lfs",
-    "curl", "wget", "rsync", "unzip", "zstd", "jq",
-    "vim", "less", "man-db", "tree", "which", "diffutils", "inetutils",
-    "procps-ng", "strace", "tmux", "ripgrep", "fd", "fzf", "iputils",
-    "python", "python-pip", "nodejs", "npm",
-    "bash-completion", "fish",
+    "base",
+    "base-devel",
+    "sudo",
+    "openssh",
+    "ca-certificates",
+    "gnupg",
+    "git",
+    "jujutsu",
+    "github-cli",
+    "git-lfs",
+    "curl",
+    "wget",
+    "rsync",
+    "unzip",
+    "zstd",
+    "jq",
+    "vim",
+    "less",
+    "man-db",
+    "tree",
+    "which",
+    "diffutils",
+    "inetutils",
+    "procps-ng",
+    "strace",
+    "tmux",
+    "ripgrep",
+    "fd",
+    "fzf",
+    "iputils",
+    "python",
+    "python-pip",
+    "nodejs",
+    "npm",
+    "bash-completion",
+    "fish",
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Deserialize)]
@@ -170,9 +199,10 @@ fn read_table(path: &Path) -> Result<toml::Table> {
     if !path.exists() {
         return Ok(toml::Table::new());
     }
-    let text = std::fs::read_to_string(path)
-        .with_context(|| format!("cannot read {}", path.display()))?;
-    text.parse().with_context(|| format!("cannot parse {}", path.display()))
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))?;
+    text.parse()
+        .with_context(|| format!("cannot parse {}", path.display()))
 }
 
 /// The global file may spell the per-box keys at the top level or inside a
@@ -220,11 +250,20 @@ pub fn load(project: &Path, overrides: &Overrides) -> Result<Config> {
 pub fn base_packages() -> Result<Vec<String>> {
     let table = read_table(&global_path())?;
     let from_key = table.get("base_packages").cloned().or_else(|| {
-        table.get("base").and_then(|b| b.as_table()).and_then(|b| b.get("packages")).cloned()
+        table
+            .get("base")
+            .and_then(|b| b.as_table())
+            .and_then(|b| b.get("packages"))
+            .cloned()
     });
     match from_key {
-        Some(value) => Ok(value.try_into().context("base_packages must be a list of strings")?),
-        None => Ok(DEFAULT_BASE_PACKAGES.iter().map(|s| s.to_string()).collect()),
+        Some(value) => Ok(value
+            .try_into()
+            .context("base_packages must be a list of strings")?),
+        None => Ok(DEFAULT_BASE_PACKAGES
+            .iter()
+            .map(|s| s.to_string())
+            .collect()),
     }
 }
 
@@ -282,7 +321,11 @@ pub fn expand(spec: &str) -> PathBuf {
             i += 1;
             continue;
         }
-        out.extend_from_slice(env_var(&with_home[start..end]).unwrap_or_default().as_bytes());
+        out.extend_from_slice(
+            env_var(&with_home[start..end])
+                .unwrap_or_default()
+                .as_bytes(),
+        );
         i = end + usize::from(braced);
     }
     PathBuf::from(OsString::from_vec(out))
@@ -293,18 +336,31 @@ mod tests {
     use super::*;
 
     fn layer(toml_text: &str) -> Layer {
-        toml_text.parse::<toml::Table>().map(toml::Value::Table).unwrap().try_into().unwrap()
+        toml_text
+            .parse::<toml::Table>()
+            .map(toml::Value::Table)
+            .unwrap()
+            .try_into()
+            .unwrap()
     }
 
     #[test]
     fn lists_accumulate_and_scalars_replace() {
         let mut cfg = Config::default();
-        cfg.apply(layer("ro = ['~/global']\nnetwork = 'nat'\nmemory_max = '4G'"));
+        cfg.apply(layer(
+            "ro = ['~/global']\nnetwork = 'nat'\nmemory_max = '4G'",
+        ));
         cfg.apply(layer("ro = ['~/project']\nnetwork = 'none'"));
         // defaults first, then each layer, no duplicates
         assert_eq!(
             cfg.ro,
-            ["~/.gitconfig", "~/.config/jj", "~/.config/git", "~/global", "~/project"]
+            [
+                "~/.gitconfig",
+                "~/.config/jj",
+                "~/.config/git",
+                "~/global",
+                "~/project"
+            ]
         );
         assert_eq!(cfg.network, Network::None);
         assert_eq!(cfg.memory_max.as_deref(), Some("4G"));
@@ -355,6 +411,9 @@ mod tests {
         assert_eq!(expand("/tmp/a$"), Path::new("/tmp/a$"));
         assert_eq!(expand("/tmp/${x"), Path::new("/tmp/${x"));
         // an unset variable expands to nothing, like a shell
-        assert_eq!(expand("/tmp/$AGENTBOX_DEFINITELY_UNSET/z"), Path::new("/tmp//z"));
+        assert_eq!(
+            expand("/tmp/$AGENTBOX_DEFINITELY_UNSET/z"),
+            Path::new("/tmp//z")
+        );
     }
 }

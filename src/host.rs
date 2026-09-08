@@ -56,7 +56,12 @@ pub fn init(handover: Option<&Path>, dry_run: bool) -> Result<()> {
     let host = match handover {
         Some(path) => {
             let h = Handover::consume(path)?;
-            Host { user: lookup_user(h.uid)?, env: h.env, cwd: h.cwd, dry_run }
+            Host {
+                user: lookup_user(h.uid)?,
+                env: h.env,
+                cwd: h.cwd,
+                dry_run,
+            }
         }
         None => Host {
             user: lookup_user(caller_uid())?,
@@ -231,7 +236,12 @@ pub struct Sh {
 }
 
 pub fn sh(argv: Vec<OsString>) -> Sh {
-    Sh { argv, quiet: false, silent: false, allow_fail: false }
+    Sh {
+        argv,
+        quiet: false,
+        silent: false,
+        allow_fail: false,
+    }
 }
 
 impl Sh {

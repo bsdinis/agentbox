@@ -24,7 +24,9 @@ pub fn is_mounted(path: &Path) -> bool {
     let target = path.to_string_lossy();
     mountinfo.lines().any(|line| {
         // fields: id parent dev:node root mountpoint ...
-        line.split_whitespace().nth(4).is_some_and(|mp| mp == target)
+        line.split_whitespace()
+            .nth(4)
+            .is_some_and(|mp| mp == target)
     })
 }
 
@@ -72,7 +74,9 @@ pub fn umount(sb: &Sandbox) -> Result<()> {
 
 /// Colons separate the fields of a `Bind=`, so they have to be escaped.
 fn escape(path: &Path) -> String {
-    path.to_string_lossy().replace('\\', r"\\").replace(':', r"\:")
+    path.to_string_lossy()
+        .replace('\\', r"\\")
+        .replace(':', r"\:")
 }
 
 /// One source of truth for both `agentbox shell` (which runs nspawn directly)
@@ -104,7 +108,11 @@ pub fn settings_text(sb: &Sandbox) -> String {
     // at start; see docs/design.md.
     out.push_str("PrivateUsersOwnership=off\n");
     for bind in sb.binds() {
-        let key = if bind.read_only { "BindReadOnly" } else { "Bind" };
+        let key = if bind.read_only {
+            "BindReadOnly"
+        } else {
+            "Bind"
+        };
         out.push_str(&format!(
             "{key}={}:{}:owneridmap\n",
             escape(&bind.src),
@@ -228,7 +236,10 @@ pub fn create(sb: &Sandbox) -> Result<bool> {
     if fresh && !dry_run() {
         set_login_shell(sb)?;
         if !sb.cfg.packages.is_empty() {
-            info(&format!("installing packages: {}", sb.cfg.packages.join(" ")));
+            info(&format!(
+                "installing packages: {}",
+                sb.cfg.packages.join(" ")
+            ));
             let mut cmd = argv!["/usr/bin/pacman", "-Sy", "--noconfirm", "--needed"];
             cmd.extend(sb.cfg.packages.iter().map(crate::host::oss));
             run_in(sb, cmd, Some("root"), Some("/"))?;
@@ -252,7 +263,9 @@ fn write_meta(sb: &Sandbox) -> Result<()> {
 /// A machine ID generated once, and a hostname that follows the config.
 fn seed_identity(sb: &Sandbox) -> Result<()> {
     let machine_id = sb.inside(Path::new("/etc/machine-id"));
-    let unset = fs::read_to_string(&machine_id).map(|s| s.trim().is_empty()).unwrap_or(true);
+    let unset = fs::read_to_string(&machine_id)
+        .map(|s| s.trim().is_empty())
+        .unwrap_or(true);
     if unset {
         let mut bytes = [0u8; 16];
         getrandom(&mut bytes)?;
@@ -311,8 +324,8 @@ fn prepare_mount_point(sb: &Sandbox, bind: &Bind) -> Result<()> {
         );
     }
     let target = sb.inside(&bind.dst);
-    let meta = fs::metadata(&bind.src)
-        .with_context(|| format!("cannot stat {}", bind.src.display()))?;
+    let meta =
+        fs::metadata(&bind.src).with_context(|| format!("cannot stat {}", bind.src.display()))?;
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -347,7 +360,9 @@ pub fn mask_host_network_units(sb: &Sandbox) -> Result<()> {
         "systemd-resolved.service",
     ] {
         let link = dir.join(unit);
-        let masked = fs::read_link(&link).map(|t| t == Path::new("/dev/null")).unwrap_or(false);
+        let masked = fs::read_link(&link)
+            .map(|t| t == Path::new("/dev/null"))
+            .unwrap_or(false);
         match sb.cfg.network {
             Network::Host if !masked => {
                 let _ = fs::remove_file(&link);

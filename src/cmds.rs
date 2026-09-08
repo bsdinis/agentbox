@@ -7,11 +7,11 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 
 use crate::argv;
+use crate::base;
 use crate::config::{self, Config, Overrides, PROJECT_FILE};
 use crate::host::{dry_run, host, oss, sh};
 use crate::nspawn;
 use crate::sandbox::Sandbox;
-use crate::base;
 
 /// Resolve the project directory a command applies to.
 pub fn project_dir(dir: &Option<PathBuf>) -> Result<PathBuf> {
@@ -42,7 +42,10 @@ pub fn init(dir: &Option<PathBuf>, force: bool) -> Result<()> {
     let project = project_dir(dir)?;
     let dest = project.join(PROJECT_FILE);
     if dest.exists() && !force {
-        bail!("{} already exists (use --force to overwrite)", dest.display());
+        bail!(
+            "{} already exists (use --force to overwrite)",
+            dest.display()
+        );
     }
     let name = project.file_name().unwrap_or_default().to_string_lossy();
     let template = format!(
@@ -134,7 +137,9 @@ pub fn enter(dir: &Option<PathBuf>, overrides: &Overrides) -> Result<()> {
 
 pub fn down(dir: &Option<PathBuf>, overrides: &Overrides) -> Result<()> {
     let sb = load(dir, overrides)?;
-    sh(argv!["machinectl", "poweroff", sb.name.clone()]).allow_fail().run()?;
+    sh(argv!["machinectl", "poweroff", sb.name.clone()])
+        .allow_fail()
+        .run()?;
     Ok(())
 }
 
@@ -162,7 +167,11 @@ pub fn list() -> Result<()> {
         let project = fs::read_to_string(dir.join("meta.json"))
             .ok()
             .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-            .and_then(|meta| meta.get("project").and_then(|p| p.as_str()).map(String::from))
+            .and_then(|meta| {
+                meta.get("project")
+                    .and_then(|p| p.as_str())
+                    .map(String::from)
+            })
             .unwrap_or_else(|| "?".into());
         let overlay = if nspawn::is_mounted(&Path::new(crate::sandbox::MACHINES).join(name)) {
             "mounted"
@@ -180,7 +189,11 @@ pub fn list() -> Result<()> {
             name.clone(),
             project,
             overlay.into(),
-            if booted.is_empty() { "-".into() } else { booted },
+            if booted.is_empty() {
+                "-".into()
+            } else {
+                booted
+            },
             writes.split('\t').next().unwrap_or("?").to_string(),
         ]);
     }
@@ -204,7 +217,11 @@ pub fn list() -> Result<()> {
 pub fn status(dir: &Option<PathBuf>, overrides: &Overrides) -> Result<()> {
     let sb = load(dir, overrides)?;
     let (lo, hi) = sb.uid_range();
-    let mounted = if nspawn::is_mounted(&sb.root()) { "mounted" } else { "not mounted" };
+    let mounted = if nspawn::is_mounted(&sb.root()) {
+        "mounted"
+    } else {
+        "not mounted"
+    };
     println!("box        {}", sb.name);
     println!("project    {}", sb.project.display());
     println!("rootfs     {} ({mounted})", sb.root().display());
@@ -215,7 +232,12 @@ pub fn status(dir: &Option<PathBuf>, overrides: &Overrides) -> Result<()> {
     println!("shell      {}", sb.shell());
     println!("mounts");
     for bind in sb.binds() {
-        println!("  {:<2} {} -> {}", bind.kind(), bind.src.display(), bind.dst.display());
+        println!(
+            "  {:<2} {} -> {}",
+            bind.kind(),
+            bind.src.display(),
+            bind.dst.display()
+        );
     }
     Ok(())
 }
@@ -329,5 +351,8 @@ fn confirm(prompt: &str) -> Result<bool> {
     if std::io::stdin().read_line(&mut answer).is_err() {
         return Ok(false);
     }
-    Ok(matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes"))
+    Ok(matches!(
+        answer.trim().to_ascii_lowercase().as_str(),
+        "y" | "yes"
+    ))
 }
