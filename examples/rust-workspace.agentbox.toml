@@ -1,0 +1,28 @@
+# A Rust service with a sibling crate as a path dependency and a reference
+# implementation the agent may read but must not touch.
+name = "api"
+network = "host"
+
+packages = ["cargo-nextest", "sccache", "postgresql"]
+
+rw = [
+  # path = "../shared-proto" in Cargo.toml resolves because the layout matches
+  "~/dev/shared-proto",
+]
+
+ro = [
+  "~/.gitconfig",
+  "~/.config/jj",
+  "~/.cargo/registry",   # warm crate cache without letting the box poison it
+  "~/dev/legacy-api",    # reference implementation
+]
+
+pass_env = ["TERM", "COLORTERM", "LANG"]
+
+memory_max = "16G"
+cpu_quota = "800%"
+
+[env]
+RUST_BACKTRACE = "1"
+CARGO_TARGET_DIR = "/home/USER/.cache/cargo-target"   # inside the box, not shared
+RUSTC_WRAPPER = "sccache"

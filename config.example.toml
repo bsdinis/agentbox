@@ -1,0 +1,37 @@
+# ~/.config/agentbox/config.toml - global defaults for every box.
+# Anything here can be overridden per project in that project's .agentbox.toml.
+
+# Packages baked into the shared base image. Changing this list needs
+# `agentbox build --refresh` (adds packages) or `--force` (rebuilds from scratch).
+# base_packages = [
+#   "base", "base-devel", "sudo", "git", "jujutsu", "python", "nodejs", "npm",
+# ]
+
+[defaults]
+network = "host"          # host | none | nat
+
+# Read-only mounts every box gets. Keep credentials out of this list.
+ro = [
+  "~/.gitconfig",
+  "~/.config/jj",
+  "~/.config/git",
+]
+
+# Read-write mounts every box gets. Usually empty; the project dir is implicit.
+rw = []
+
+# Host environment variables forwarded into the box when they are set.
+pass_env = ["TERM", "COLORTERM", "LANG"]
+
+# Resource caps applied to the container's systemd scope.
+# memory_max = "16G"
+# cpu_quota  = "800%"
+# tasks_max  = "4096"
+
+# Login shell inside the box. Defaults to your host shell if the base image
+# has it, otherwise /bin/bash.
+# shell = "/usr/bin/fish"
+
+# UID range the container's 0..65535 is mapped onto. Must be a multiple of
+# 65536. Change this only before building the base image.
+# uid_base = 1310720000

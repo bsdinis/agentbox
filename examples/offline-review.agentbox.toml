@@ -1,0 +1,15 @@
+# Locked down: a refactor or review task with no network at all. Everything the
+# agent needs must be baked in at creation time, since pacman cannot reach a
+# mirror once the box exists.
+name = "review"
+network = "none"
+
+packages = ["ruff", "mypy", "python-pytest"]
+
+ro = [
+  "~/.gitconfig",
+  "~/.config/jj",
+]
+
+memory_max = "8G"
+cpu_quota = "400%"

@@ -1,0 +1,20 @@
+# A pnpm monorepo. node_modules stays inside the box: it is huge, disposable,
+# and platform-specific, so keeping it out of the host tree is a feature.
+name = "web"
+network = "host"
+
+packages = ["pnpm", "chromium"]
+
+ro = [
+  "~/.gitconfig",
+  "~/.config/jj",
+  "~/.npmrc",
+]
+
+pass_env = ["TERM", "COLORTERM", "LANG", "ANTHROPIC_API_KEY"]
+
+memory_max = "12G"
+
+[env]
+PLAYWRIGHT_BROWSERS_PATH = "/usr/lib/chromium"
+CI = "1"
