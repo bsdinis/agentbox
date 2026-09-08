@@ -99,9 +99,11 @@ pub fn shell(
     } else {
         cmd.iter().map(oss).collect()
     };
-    let user = if as_root { Some("root") } else { None };
+    // Named explicitly rather than left to the settings file, which applies to
+    // booted launches too (see nspawn::settings_text).
+    let user = if as_root { "root" } else { &sb.user.name };
     let chdir = sb.project.to_string_lossy().into_owned();
-    nspawn::exec_in(&sb, argv, user, Some(&chdir))?;
+    nspawn::exec_in(&sb, argv, Some(user), Some(&chdir))?;
     unreachable!()
 }
 
@@ -306,6 +308,7 @@ pub fn remove(dir: &Option<PathBuf>, overrides: &Overrides, yes: bool) -> Result
     if sb.settings().exists() {
         fs::remove_file(sb.settings())?;
     }
+    nspawn::clear_unit_caps(&sb)?;
     println!("removed {}", sb.name);
     Ok(())
 }

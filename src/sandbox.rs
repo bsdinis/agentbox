@@ -13,6 +13,7 @@ use crate::host::{env_var, host, User};
 pub const STATE: &str = "/var/lib/agentbox";
 pub const MACHINES: &str = "/var/lib/machines";
 pub const NSPAWN_DIR: &str = "/etc/systemd/nspawn";
+pub const UNIT_DIR: &str = "/etc/systemd/system";
 
 /// Where the base image and the boxes live.
 ///
@@ -154,12 +155,22 @@ impl Sandbox {
                 Some(sock) if sock.exists() => binds.push(Bind {
                     read_only: false,
                     src: sock,
-                    dst: PathBuf::from("/run/ssh-agent.sock"),
+                    dst: self.ssh_agent_dst(),
                 }),
                 _ => crate::warn("ssh_agent requested but SSH_AUTH_SOCK is unset; skipping"),
             }
         }
         binds
+    }
+
+    /// Where a forwarded agent socket appears inside the box.
+    ///
+    /// Under the sandbox user's home rather than /run: nspawn mounts its own
+    /// tmpfs on /run, which would hide the prepared mount point and leave the
+    /// socket owned by container root, unusable by the sandbox user. See
+    /// `nspawn::NSPAWN_OWNED`.
+    fn ssh_agent_dst(&self) -> PathBuf {
+        self.user.home.join(".agentbox/ssh-agent.sock")
     }
 
     /// Variables set inside the box: forwarded host ones, then explicit ones.
@@ -172,7 +183,8 @@ impl Sandbox {
         }
         env.extend(self.cfg.env.clone());
         if self.cfg.ssh_agent {
-            env.insert("SSH_AUTH_SOCK".into(), "/run/ssh-agent.sock".into());
+            let sock = self.ssh_agent_dst();
+            env.insert("SSH_AUTH_SOCK".into(), sock.display().to_string());
         }
         env.entry("AGENTBOX".into()).or_insert_with(|| self.name.clone());
         env

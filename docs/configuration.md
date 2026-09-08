@@ -24,12 +24,18 @@ global config insists on.
 | `packages` | list of strings | `[]` | pacman packages installed into the box the first time it is created. |
 | `env` | table | `{}` | Variables set inside the box, verbatim. |
 | `pass_env` | list of strings | `["TERM", "COLORTERM", "LANG"]` | Host variables forwarded **if set**. Use for `ANTHROPIC_API_KEY`, `GITHUB_TOKEN`. |
-| `ssh_agent` | bool | `false` | Bind `$SSH_AUTH_SOCK` to `/run/ssh-agent.sock` and export it. |
+| `ssh_agent` | bool | `false` | Bind `$SSH_AUTH_SOCK` to `~/.agentbox/ssh-agent.sock` and export it. |
 | `shell` | path | your host shell if present in the image, else `/bin/bash` | Login shell inside the box. |
 | `memory_max` | string | unset | `MemoryMax=` on the container scope, e.g. `"16G"`. |
 | `cpu_quota` | string | unset | `CPUQuota=`, e.g. `"400%"`. |
 | `tasks_max` | string | unset | `TasksMax=`. |
 | `uid_base` | int | `1310720000` | Host UID that container UID 0 maps to. Multiple of 65536. Only meaningful before `agentbox build`. |
+
+The three caps are unit properties rather than container settings, so they are
+applied in the two places a box can be launched from: `run` and `shell` start
+the container inside a transient scope of their own carrying the caps, and
+`up` gets a drop-in on its `systemd-nspawn@` instance. `agentbox rm` removes
+the drop-in.
 
 Global-config-only:
 

@@ -59,6 +59,19 @@ Three things to check, in order:
 3. Did you create the box before adding the mount? Mount points are created at
    box creation. `agentbox rm && agentbox shell` (or `reset`) re-creates them.
 
+## `cannot map ... systemd-nspawn mounts its own /tmp there`
+
+A project, or a mapped directory, cannot live under `/tmp`, `/run`, `/dev`,
+`/proc` or `/sys`. systemd-nspawn mounts its own filesystem over each of those
+inside the container, and it does so *before* applying the binds - so the
+mount point agentbox prepared underneath is hidden, nspawn creates its own
+owned by container root, and `owneridmap` maps you onto that instead of onto
+the sandbox user. A mode 700 project then cannot even be entered, which is why
+this is refused up front rather than failing later as a `chdir` error.
+
+Move the project somewhere else. `$HOME`, `/srv`, `/var/tmp` and anything else
+outside that list are all fine.
+
 ## `no base image yet - run agentbox build first`
 
 Expected on a fresh install. If you *have* built it, check the image is where
