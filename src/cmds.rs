@@ -294,7 +294,7 @@ pub fn show_config(dir: &Option<PathBuf>, overrides: &Overrides) -> Result<()> {
     let sb = load(dir, overrides)?;
     print!("{}", effective_toml(&sb));
     println!("--- {} ---", sb.settings().display());
-    print!("{}", nspawn::settings_text(&sb));
+    print!("{}", nspawn::settings_text(&sb)?);
     Ok(())
 }
 
