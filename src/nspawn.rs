@@ -1283,8 +1283,18 @@ pub fn attach(sb: &Sandbox, cmd: Vec<std::ffi::OsString>, user: &str, chdir: &st
         println!("  {}", crate::host::render(&argv));
         return Ok(0);
     }
-    let status = std::process::Command::new(&argv[0])
-        .args(&argv[1..])
+    let mut command = std::process::Command::new(&argv[0]);
+    command.args(&argv[1..]);
+    // In `--pipe` mode systemd-run forwards our stdin to the container's
+    // transient unit, but a *terminal* stdin cannot be set up there - systemd
+    // fails the unit with EXIT_STDIN (exit 208) - and there is no interactive
+    // input to forward when the output is redirected anyway. Feed the unit
+    // /dev/null in that case; a genuine piped or redirected stdin (not a tty,
+    // e.g. `data | agentbox run box -- cat`) is forwarded as-is.
+    if !interactive_stdio() && unsafe { libc::isatty(0) } == 1 {
+        command.stdin(std::process::Stdio::null());
+    }
+    let status = command
         .status()
         .with_context(|| format!("cannot run {:?}", argv[0]))?;
     // A signalled payload has no code; report the conventional 128+signum so a
