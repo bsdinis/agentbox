@@ -337,6 +337,71 @@ because the agent rewrites it constantly. The box ends up with tokens and no
 account, and Claude Code asks you to log in. See
 [security.md](security.md#authentication).
 
+### The first-run wizard in a fresh box
+
+A working token is not the whole story. Interactive Claude Code runs its
+first-run wizard before it gets as far as using one, and the state saying you
+are past that wizard lives in `~/.claude.json` - which a fresh box does not
+have. So a new box walks you through picking a theme, then **signing in**, then
+whether you trust the project directory.
+
+That middle step is the trap. A box cannot complete a browser sign-in, so a box
+holding a perfectly good token still asks you to log in, and answering the
+wizard is not a way through it. It reads as a broken token and is not one:
+
+```console
+[box]$ claude auth status
+logged in
+```
+
+`auth status` reporting `logged in` while the interactive session still asks is
+the tell - authentication is fine, the wizard is what is in the way.
+
+Seed the one key that retires it instead. From inside the box:
+
+```console
+[box]$ echo '{"hasCompletedOnboarding":true}' > ~/.claude.json
+```
+
+That single key skips the theme picker *and* the sign-in step; the box's token is
+used as it already was. The remaining "do you trust this folder?" prompt is
+answerable in the box and persists, since `~/.claude.json` is writable there.
+Both survive until `agentbox reset` or `rm`.
+
+To keep them across a reset too, map a **dedicated** host file, not your own
+`~/.claude.json`:
+
+```toml
+rw = ["~/.agentbox-claude/myproject.json:/home/you/.claude.json"]
+```
+
+`rw`, not `ro`: Claude Code rewrites this file on every session - session ids,
+costs, timings, MCP state - and a read-only mount makes it fail. That is a
+second reason it has to be a file of your own rather than the host's.
+
+Seed it once and every box after that starts at the prompt, trust prompt
+included:
+
+```json
+{
+  "hasCompletedOnboarding": true,
+  "projects": {
+    "/home/you/dev/myproject": { "hasTrustDialogAccepted": true }
+  }
+}
+```
+
+Those two keys are the whole seed - `theme` and `lastOnboardingVersion` appear
+in a host `~/.claude.json` but are not load-bearing here, and Claude Code falls
+back to its default theme without them. The `projects` key is the path *inside*
+the box, which agentbox spells the same as on the host, so it is your real
+project path; a file shared between boxes needs one entry per project
+directory. This is the `~/.claude.json` analogue of the dedicated `.claude`
+directory in [security.md](security.md), and it is safe for the same reason: it
+is a file of your own that the host's Claude Code never reads, so the `mcpServers`
+the agent may write into it are never host-executed config. Mapping your real
+`~/.claude.json` is what stays off the table.
+
 A reasonable default for unattended runs:
 
 ```toml

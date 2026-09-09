@@ -137,7 +137,10 @@ host directory (one you keep separate from your real `~/.claude`) read-write:
 rw = ["~/.agentbox-claude/myproject:/home/you/.claude"]
 ```
 
-Never point the destination's source at your host `~/.claude`.
+Never point the destination's source at your host `~/.claude`. The same applies
+to `~/.claude.json`: a dedicated file of your own mapped there is fine and is how
+you skip the first-run wizard in every new box (see
+[usage.md](usage.md#the-first-run-wizard-in-a-fresh-box)); your real one is not.
 
 ### Authentication
 
