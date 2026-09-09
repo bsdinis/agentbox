@@ -133,6 +133,12 @@ enum Command {
         target: Target,
     },
 
+    /// Remount a box on the base image as it stands now, keeping its writes
+    Remount {
+        #[command(flatten)]
+        target: Target,
+    },
+
     /// List boxes, their overlay state and how much each has written
     Ls,
 
@@ -221,6 +227,7 @@ fn run() -> Result<()> {
         }
         Command::Up { target } => cmds::up(&target.r#box, &target.overrides()),
         Command::Down { target } => cmds::down(&target.r#box, &target.overrides()),
+        Command::Remount { target } => cmds::remount(&target.r#box, &target.overrides()),
         Command::Ls => cmds::list(),
         Command::Status { target } => cmds::status(&target.r#box, &target.overrides()),
         Command::Config { target } => cmds::show_config(&target.r#box, &target.overrides()),

@@ -51,6 +51,80 @@ Older versions let systemd-nspawn discover this instead, which surfaced as
 `execv(claude) failed: No such file or directory` after the box was already
 created, its login shell set and its packages installed.
 
+If the program *is* installed in the box and `ls` still lists it, this is a
+different problem — see the next entry.
+
+## A program the base image has is missing inside a box
+
+The symptom is distinctive: the file is listed, but nothing can touch it.
+
+```console
+[box]$ ls -l /usr/bin/nvim
+-????????? ? ? ? ?            ? /usr/bin/nvim
+[box]$ nvim
+bash: /usr/bin/nvim: No such file or directory
+[box]$ pacman -Qkk neovim
+neovim: 2311 total files, 1 altered file
+```
+
+pacman is telling the truth: the package is installed and every other file in
+it is fine. What is broken is this box's *view* of the base image. The image
+was rewritten — `agentbox build --refresh` or `--force` — while the box's
+overlay was mounted on it, and overlayfs does not tolerate a lower layer
+changing underneath it. `readdir` picks the new name up from the lower layer,
+but a lookup that resolved *before* the rewrite (any `which nvim` that came
+back empty) is still cached as a miss. So the one path something had already
+asked about stays missing, while everything the refresh added under paths
+nobody had touched works normally — which is why it looks like a single
+corrupt file rather than a stale mount.
+
+This is now prevented, and when it does turn up it is named rather than left
+for you to deduce. `agentbox build` refuses while any box is alive and unmounts
+the idle ones before touching the image, so a build cannot arrange it any more;
+and every overlay records which image it is a view of, so one that has fallen
+behind shows up as `stale`:
+
+```console
+$ agentbox ls
+BOX             PROJECT           OVERLAY  BOOTED    WRITES
+myproj-a1b2c3d  /home/you/myproj  stale    inactive  184M
+```
+
+Starting the box fixes it: a launch remounts a stale overlay before the box
+boots. `agentbox remount <box>` does the same without starting anything.
+
+```console
+$ agentbox down <box>       # only if it is running - a live overlay cannot be swapped
+$ agentbox remount <box>
+remounted myproj-a1b2c3d on the current base image
+```
+
+Neither costs the box anything: its writes are in `upper` on disk, not in the
+mount, so all a remount discards is the kernel's cached view of the layer
+below. `agentbox reset <box>` cures it too, but by deleting everything the box
+has ever written — a far larger hammer than this needs.
+
+An overlay mounted by an agentbox older than this reads as `stale` as well,
+having no record of what it was mounted on. That is the intended answer rather
+than a false positive: those are exactly the mounts that could be straddling a
+rebuild. One remount settles it for good.
+
+To repair one program *without* dropping the session you are sitting in — a
+remount cannot happen underneath a running box, and you may not want to leave —
+reinstalling it writes the file into the box's own upper layer, where the stale
+lower lookup cannot mask it:
+
+```console
+[box]$ sudo pacman -S --overwrite '/usr/bin/nvim' neovim
+```
+
+`pacman -Qkk` over everything names the whole blast radius, which is worth
+checking before assuming it was only the one binary you noticed:
+
+```console
+[box]$ sudo pacman -Qkk 2>&1 | grep 'No such file'
+```
+
 ## `Note: in a future version of systemd-nspawn ... socket address families`
 
 Gone as of the `address_families` setting: agentbox now states the policy

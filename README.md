@@ -82,6 +82,7 @@ agentbox init [DIR] [--force]        write .agentbox.toml for this project
 agentbox shell [BOX] [-- CMD ...]    boot or attach to the box, open a shell
 agentbox run [BOX] -- CMD ...        boot or attach to the box, run one command
 agentbox up | down [BOX]             boot a box and keep it up | power it off
+agentbox remount [BOX]               remount on the current base image, keeping writes
 agentbox ls                          list boxes, overlay state, bytes written
 agentbox status [BOX]                show the box and mount plan for this project
 agentbox config [BOX]                show the effective config and .nspawn file

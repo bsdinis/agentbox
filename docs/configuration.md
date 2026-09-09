@@ -71,7 +71,7 @@ Global-config-only:
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `base_packages` | list of strings | see `DEFAULT_BASE_PACKAGES` in `src/config.rs` | Packages in the shared base image. Apply with `agentbox build --refresh`. |
+| `base_packages` | list of strings | see `DEFAULT_BASE_PACKAGES` in `src/config.rs` | Packages in the shared base image. Replaces the built-in list rather than adding to it. Apply with `agentbox build --refresh`, every box powered off. |
 
 In the global file you may put the per-box keys either at the top level or
 under a `[defaults]` table; both work, and `[defaults]` is clearer.

@@ -13,7 +13,7 @@ use anyhow::{bail, Context, Result};
 use crate::argv;
 use crate::config::{Network, BACKGROUND_AUTO, PROJECT_FILE, UID_RANGE};
 use crate::host::{dry_run, env_var, host, sh};
-use crate::sandbox::{overbroad_reason, Bind, Sandbox, NSPAWN_DIR, UNIT_DIR};
+use crate::sandbox::{overbroad_reason, Bind, Sandbox, MACHINES, NSPAWN_DIR, UNIT_DIR};
 use crate::{base, info};
 
 // --------------------------------------------------------------------------
@@ -38,7 +38,26 @@ pub fn is_mounted(path: &Path) -> bool {
 /// little here and interact badly with an image whose UIDs were shifted.
 pub fn mount(sb: &Sandbox) -> Result<()> {
     if is_mounted(&sb.root()) {
-        return Ok(());
+        if !overlay_stale(&sb.name) {
+            return Ok(());
+        }
+        // The box is idle here - a launch mounts before it boots - so the cure
+        // is free: drop the stale mount and build a new one over the image as
+        // it stands. The box's writes are in `upper` on disk, not in the mount.
+        if service_active(&sb.name) {
+            crate::warn(&format!(
+                "{name} is running on an overlay older than the base image, so \
+                 files the image has gained may be invisible inside it; \
+                 `agentbox down {name}` then `agentbox remount {name}` clears it",
+                name = sb.name
+            ));
+            return Ok(());
+        }
+        info(&format!(
+            "{} is on an overlay older than the base image; remounting",
+            sb.name
+        ));
+        umount_root(&sb.root())?;
     }
     base::require()?;
     for dir in [sb.upper(), sb.work(), sb.root()] {
@@ -61,14 +80,90 @@ pub fn mount(sb: &Sandbox) -> Result<()> {
         sb.root()
     ])
     .run()?;
+    // What this mount is a view of, so a later launch can tell that the image
+    // underneath it has moved on. The mkdir above made the box directory, and
+    // dry runs never mounted anything to record.
+    if !dry_run() {
+        let path = overlay_id_path(&sb.name);
+        fs::write(&path, format!("{}\n", base::id()))
+            .with_context(|| format!("cannot write {}", path.display()))?;
+    }
     Ok(())
 }
 
 pub fn umount(sb: &Sandbox) -> Result<()> {
-    if is_mounted(&sb.root()) {
-        sh(argv!["umount", sb.root()]).run()?;
+    umount_root(&sb.root())
+}
+
+/// Unmount one box's overlay by path, for a caller that holds a name rather
+/// than a whole `Sandbox` - `base::build`, taking idle boxes off the image it
+/// is about to rewrite.
+pub fn umount_root(root: &Path) -> Result<()> {
+    if is_mounted(root) {
+        sh(argv!["umount", root]).run()?;
     }
     Ok(())
+}
+
+/// Every box on this host, sorted by name.
+pub fn boxes() -> Vec<String> {
+    let Ok(entries) = fs::read_dir(state_dir().join("boxes")) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
+        .flatten()
+        .filter(|entry| entry.path().is_dir())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+/// Every box whose overlay is mounted right now. Each one has the base image as
+/// its lower layer, so each one is a reason not to touch it.
+pub fn mounted_boxes() -> Vec<String> {
+    boxes()
+        .into_iter()
+        .filter(|name| is_mounted(&Path::new(MACHINES).join(name)))
+        .collect()
+}
+
+/// Which base image a box's overlay was mounted on, written when it is mounted.
+fn overlay_id_path(name: &str) -> PathBuf {
+    state_dir().join("boxes").join(name).join("overlay.id")
+}
+
+/// Whether a box is mounted on an image that has changed underneath it.
+///
+/// overlayfs never revalidates its lower layer, so a mount that outlived a
+/// `build` keeps serving the view it cached: a file the build added can be
+/// listed by `readdir` and still `ENOENT` on open, for the life of the mount.
+/// `build` now takes every box off the image before touching it, so a stale
+/// mount can only have been left by an older agentbox - which is exactly the
+/// mount that might be straddling a rebuild, so "no record at all" counts as
+/// stale rather than as nothing to worry about. Every mount this version makes
+/// writes a record, even an empty one for an image built before ids existed,
+/// so an unstamped image matches its own overlays instead of condemning them.
+pub fn overlay_stale(name: &str) -> bool {
+    if !is_mounted(&Path::new(MACHINES).join(name)) {
+        return false;
+    }
+    let recorded = fs::read_to_string(overlay_id_path(name))
+        .ok()
+        .map(|id| id.trim().to_string());
+    recorded != Some(base::id())
+}
+
+/// Whether a box's container service is up, by name. `session::running`
+/// answers the same question for a box there is a `Sandbox` for.
+pub fn service_active(name: &str) -> bool {
+    sh(argv![
+        "systemctl",
+        "is-active",
+        format!("systemd-nspawn@{name}.service")
+    ])
+    .output()
+        == "active"
 }
 
 // --------------------------------------------------------------------------

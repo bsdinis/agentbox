@@ -11,10 +11,44 @@ use crate::argv;
 use crate::config::{self, UID_RANGE};
 use crate::host::{dry_run, host, oss, sh};
 use crate::info;
-use crate::sandbox::state_dir;
+use crate::nspawn;
+use crate::sandbox::{state_dir, MACHINES};
 
 pub fn image() -> PathBuf {
     state_dir().join("base")
+}
+
+/// Where the image's identity is stamped. Beside the image rather than inside
+/// it: a box would otherwise read its own lower layer's copy through the
+/// overlay, which is the one place it cannot be trusted to be current, and
+/// `--force` deletes the image directory wholesale.
+fn id_path() -> PathBuf {
+    state_dir().join("base.id")
+}
+
+/// What the image is right now, changed by every build. An empty string means
+/// an image built before this was stamped, which is indistinguishable from any
+/// other unstamped image - so an overlay carrying the same empty id is left
+/// alone rather than reported stale on every launch.
+pub fn id() -> String {
+    fs::read_to_string(id_path())
+        .unwrap_or_default()
+        .trim()
+        .to_string()
+}
+
+/// Give the image a new identity, so every overlay mounted on the old one can
+/// tell that what is underneath it has changed.
+fn stamp() -> Result<()> {
+    if dry_run() {
+        return Ok(());
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    fs::write(id_path(), format!("{now}\n"))
+        .with_context(|| format!("cannot stamp {}", id_path().display()))
 }
 
 pub fn require() -> Result<()> {
@@ -78,6 +112,39 @@ fn in_image(cmd: Vec<OsString>, uid_base: Option<u32>, host_cache: bool) -> Resu
     sh(args).run().map(|_| ())
 }
 
+/// Take every box off the base image before it is rewritten.
+///
+/// A box's overlay has the base as its `lowerdir`, and overlayfs does not
+/// tolerate a lower layer changing underneath it: the box goes on serving the
+/// view it cached, so a file `--refresh` adds can end up half-visible - listed
+/// by `readdir`, `ENOENT` on open - and stay that way for the life of the
+/// mount. `--force` is worse still, deleting the layer outright.
+///
+/// A stopped box is no obstacle: unmounting it costs nothing, since its writes
+/// live in `upper` on disk and the next launch remounts on demand. A running
+/// box has to be powered off by hand, so name the boxes and stop.
+fn release_boxes() -> Result<()> {
+    let running: Vec<String> = nspawn::boxes()
+        .into_iter()
+        .filter(|name| nspawn::service_active(name))
+        .collect();
+    if !running.is_empty() {
+        bail!(
+            "these boxes are running on the base image: {}\n\
+             power them off first (`agentbox down <box>`, or leave the `shell`/`run` \
+             sessions holding them); changing the image under a live box corrupts \
+             what that box sees",
+            running.join(", ")
+        );
+    }
+    // Everything left is idle, so nothing here can fail for being in use.
+    for name in nspawn::mounted_boxes() {
+        info(&format!("taking idle box {name} off the base image"));
+        nspawn::umount_root(&Path::new(MACHINES).join(&name))?;
+    }
+    Ok(())
+}
+
 pub fn build(refresh: bool, force: bool) -> Result<()> {
     let uid_base = config::global_uid_base()?;
     let packages = config::base_packages()?;
@@ -90,7 +157,16 @@ pub fn build(refresh: bool, force: bool) -> Result<()> {
             base.display()
         );
     }
+    // Both destructive paths below rewrite the layer every box is overlaying,
+    // so take the boxes off it first.
+    if base.exists() && (refresh || force) {
+        release_boxes()?;
+    }
     if force && base.exists() {
+        crate::warn(
+            "existing boxes keep the writes they made over the old image; \
+             `agentbox reset <box>` if one misbehaves on the new one",
+        );
         info(&format!("removing {}", base.display()));
         sh(argv!["rm", "--one-file-system", "-rf", &base]).run()?;
     }
@@ -101,7 +177,8 @@ pub fn build(refresh: bool, force: bool) -> Result<()> {
         info("refreshing base image");
         let mut cmd = argv!["/usr/bin/pacman", "-Syu", "--noconfirm", "--needed"];
         cmd.extend(packages.iter().map(oss));
-        return in_image(cmd, Some(uid_base), false);
+        in_image(cmd, Some(uid_base), false)?;
+        return stamp();
     }
 
     bootstrap(&base)?;
@@ -149,6 +226,7 @@ pub fn build(refresh: bool, force: bool) -> Result<()> {
     ])
     .run()?;
 
+    stamp()?;
     info(&format!("base image ready: {}", base.display()));
     Ok(())
 }

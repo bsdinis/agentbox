@@ -61,7 +61,10 @@ packages = ["cargo-nextest", "postgresql", "redis"]
 ```
 
 To add a package to *every* box, put it in `base_packages` in
-`~/.config/agentbox/config.toml` and run `agentbox build --refresh`.
+`~/.config/agentbox/config.toml` and rebuild the shared image. That list
+replaces the built-in one rather than adding to it, and the rebuild needs every
+box powered off, so it has a short procedure of its own:
+[setup.md](setup.md#adding-a-package-to-every-box).
 
 ## sudo
 
@@ -307,8 +310,14 @@ pass_env = ["ANTHROPIC_API_KEY"]    # TERM, COLORTERM and LANG come as standard
 ```
 
 ```toml
-# ~/.config/agentbox/config.toml - in every box, baked into the base image
-base_packages = ["base", "base-devel", "sudo", "git", "jujutsu", "nodejs", "npm"]
+# ~/.config/agentbox/config.toml - in every box, baked into the base image.
+# This list REPLACES the built-in one rather than adding to it, so start from
+# the copy in config.example.toml, which is the built-in list verbatim, and add
+# to that. A short list here is a short image the next time you `build --force`.
+base_packages = [
+  "base", "base-devel", "sudo", ...,      # the built-in list, unchanged
+  "claude-code",                          # and what this host wants on top
+]
 ```
 
 If you want the agent to reuse your host login rather than an API key, map its

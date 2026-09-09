@@ -433,6 +433,23 @@ pub fn expand(spec: &str) -> PathBuf {
 mod tests {
     use super::*;
 
+    /// The commented `base_packages` in config.example.toml is the built-in
+    /// list verbatim, so that uncommenting it is a no-op and adding one line to
+    /// it cannot quietly shrink the image - this list replaces the built-in one
+    /// rather than adding to it, unlike every other list in the file. Nothing
+    /// keeps the two in step but this test.
+    #[test]
+    fn the_example_config_shows_the_real_default_package_list() {
+        let example = include_str!("../config.example.toml");
+        let listed: Vec<&str> = example
+            .lines()
+            .skip_while(|line| !line.starts_with("# base_packages = ["))
+            .take_while(|line| !line.starts_with("# ]"))
+            .flat_map(|line| line.split('"').skip(1).step_by(2))
+            .collect();
+        assert_eq!(listed, DEFAULT_BASE_PACKAGES);
+    }
+
     fn layer(toml_text: &str) -> Layer {
         toml_text
             .parse::<toml::Table>()

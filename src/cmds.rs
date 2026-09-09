@@ -339,6 +339,35 @@ pub fn down(spec: &Option<String>, overrides: &Overrides) -> Result<()> {
     session::down(&sb)
 }
 
+/// Drop a box's overlay and mount it again, so it sees the base image as it is
+/// now rather than as it was when the box was last started.
+///
+/// Lossless and quick: everything the box has written lives in `upper` on disk,
+/// not in the mount, and only the kernel's cached view of the image underneath
+/// is discarded. This is the whole cure for a box left straddling a rebuild -
+/// `reset` also cures it, but by deleting the box's writes, which is a far
+/// larger hammer than the problem needs.
+pub fn remount(spec: &Option<String>, overrides: &Overrides) -> Result<()> {
+    let sb = load(spec, overrides)?;
+    if !sb.dir().exists() {
+        bail!("no box for {}", sb.project.display());
+    }
+    // An overlay cannot be swapped underneath a container that is running on
+    // it, and powering someone's box off is not this command's call to make.
+    if nspawn::service_active(&sb.name) {
+        bail!(
+            "{name} is running; `agentbox down {name}` first, then remount it",
+            name = sb.name
+        );
+    }
+    nspawn::umount(&sb)?;
+    nspawn::mount(&sb)?;
+    if !dry_run() {
+        println!("remounted {} on the current base image", sb.name);
+    }
+    Ok(())
+}
+
 pub fn list() -> Result<()> {
     let boxes = nspawn::state_dir().join("boxes");
     let Ok(entries) = fs::read_dir(&boxes) else {
@@ -363,7 +392,11 @@ pub fn list() -> Result<()> {
         let project = box_project(name)
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "?".into());
-        let overlay = if nspawn::is_mounted(&Path::new(crate::sandbox::MACHINES).join(name)) {
+        let overlay = if nspawn::overlay_stale(name) {
+            // Mounted, but on an image that has since changed: `agentbox
+            // remount` is the fix, and the troubleshooting entry says why.
+            "stale"
+        } else if nspawn::is_mounted(&Path::new(crate::sandbox::MACHINES).join(name)) {
             "mounted"
         } else {
             "-"

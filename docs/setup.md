@@ -72,13 +72,57 @@ One-time, a few minutes, and every project shares the result. The stages are:
 Useful variants:
 
 ```console
-$ agentbox build --refresh    # pacman -Syu the base, keeps existing boxes' overlays
-$ agentbox build --force      # delete and rebuild from scratch
+$ agentbox build --refresh    # pacman -Syu the base image in place
+$ agentbox build --force      # delete and rebuild it from scratch
 ```
 
-`--refresh` updates the shared lower layer under running boxes. Existing boxes
-keep any file they have already modified (that copy lives in their overlay),
-so refresh, then `agentbox reset` a box if you want it to pick everything up.
+Both rewrite the layer every box overlays, so both begin by taking the boxes
+off it. A *running* box — any of them, mounted or not — refuses the build by
+name; power it off with `agentbox down <box>`, or leave the `shell`/`run`
+sessions holding it. Once nothing is alive, every mounted box is unmounted for
+you, which costs nothing: their writes live in `upper` on disk, not in the
+mount, and the next launch remounts on demand.
+
+That is not caution for its own sake. overlayfs does not tolerate its lower
+layer changing underneath it: a box left mounted across a refresh goes on
+serving the view it cached, so a file the refresh adds can end up half-visible
+— listed by `ls` but `ENOENT` on open, which is
+[its own troubleshooting entry](troubleshooting.md#a-program-the-base-image-has-is-missing-inside-a-box).
+
+As a second line of defence, each build stamps the image with a new identity
+and every overlay records the one it was mounted on. A box whose image has
+moved on shows as `stale` in `agentbox ls`, a launch remounts it before booting,
+and `agentbox remount <box>` does it on demand — all of it lossless, since a
+box's writes are in `upper` on disk rather than in the mount.
+
+## Adding a package to every box
+
+`base_packages` is the image's package list, so changing it means rebuilding
+the image:
+
+```console
+$ agentbox ls                                  # who is on the image right now
+$ agentbox down <box>                          # for each one still running
+$ $EDITOR ~/.config/agentbox/config.toml       # base_packages = [...]
+$ agentbox build --refresh
+$ agentbox shell                               # remounts over the new image
+```
+
+Two things to know before editing that list:
+
+* **It replaces the built-in one rather than adding to it** — unlike every
+  other list in the configuration. Whatever you write is the whole image, so
+  start from `DEFAULT_BASE_PACKAGES` in `src/config.rs` and add to it. A short
+  list costs nothing on `--refresh`, which only ever installs and upgrades, but
+  it is the entire image the next time you `--force`.
+* **A refresh is a `pacman -Syu`**, so it upgrades everything already in the
+  image, not only what you added.
+
+An existing box keeps any file it had already modified, since that copy lives
+in its own overlay. `agentbox reset <box>` if you want one to pick the new
+image up completely. For a package only one project needs, `packages` in its
+`.agentbox.toml` is cheaper than a rebuild — see
+[usage.md](usage.md#installing-packages).
 
 ## Verify the install
 

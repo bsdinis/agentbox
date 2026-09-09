@@ -117,6 +117,16 @@ installed() { box sh -c 'command -v cowsay >/dev/null && echo installed || echo 
 check 'pacman installed a package' "$(installed)" installed
 check 'the package actually runs'  "$(box sh -c 'cowsay moo | grep -c moo')" 1
 check 'host is unaffected'         "$(command -v cowsay || echo none)" none
+
+# A remount is the cure for a box whose image moved underneath it, and it is
+# only usable as a cure if it costs the box nothing: its writes live in `upper`
+# on disk, not in the mount, so all a remount discards is the kernel's cached
+# view of the layer below. The package installed a moment ago is exactly the
+# state that has to survive.
+"$AGENTBOX" remount "$PROJ" >/dev/null 2>&1
+check 'remount keeps what the box installed' "$(installed)" installed
+check 'remount leaves the box on a current overlay' \
+  "$("$AGENTBOX" ls | awk -v b="$BOXNAME" '$1 == b {print $3}')" mounted
 # Without the preflight this is nspawn's `execv(...) failed`, printed after the
 # box is already up and with nothing to say the program was never installed.
 MISSING="$("$AGENTBOX" run "$PROJ" -- agentbox-no-such-program 2>&1)"
@@ -266,6 +276,21 @@ check "the box's own systemd is up" \
 check 'registers with machined'  "$(machinectl list --no-legend 2>/dev/null | awk -v b="$LBOX" '$1==b{print "listed"}')" listed
 check 'the settings file applied to the booted box' \
   "$(sudo systemd-run -M "$LBOX" --pipe --quiet --wait /usr/bin/hostname 2>/dev/null)" "$LBOX"
+
+# The base image is the lower layer of every mounted box, and overlayfs does
+# not tolerate a lower layer changing underneath a live box: the box goes on
+# serving the view it cached, so a package the refresh adds can end up
+# half-visible - listed by readdir, ENOENT on open. `build` has to refuse while
+# this box is up. Aimed at a decoy state directory holding a stand-in for the
+# box, so refusing is the only thing this can do to anything that matters: were
+# the guard gone, the refresh would rewrite the empty decoy, not the real image.
+DSTATE="$(mktemp -d "$root/agentbox-decoystate-XXXXXX")"
+sudo mkdir -p "$DSTATE/base/usr" "$DSTATE/boxes/$LBOX"
+check 'build refuses to change the image under a running box' \
+  "$(sudo env AGENTBOX_STATE="$DSTATE" "$AGENTBOX" build --refresh 2>&1 |
+     grep -c 'running on the base image')" 1
+sudo rm -rf "$DSTATE"
+
 "$AGENTBOX" down "$LIMITS" >/dev/null 2>&1
 for _ in $(seq 60); do
   settled "$SERVICE" && break

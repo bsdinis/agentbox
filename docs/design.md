@@ -31,7 +31,15 @@ overlayfs gives per-project writability at the price of the diff:
   size; a box that has installed a few packages costs tens of megabytes.
 * `agentbox reset` is `rm -rf upper` and a remount. Roughly a second, and it
   cannot touch your code, which is a bind mount rather than part of the image.
-* `agentbox build --refresh` updates the base under every box at once.
+* `agentbox build --refresh` updates the base under every box at once. It
+  refuses while any box is running and unmounts the rest first: overlayfs never
+  revalidates its lower layer, so a mount that straddles a rebuild goes on
+  serving the view it cached - a file the build added can be listed by
+  `readdir` and still `ENOENT` on open, for as long as that mount lives.
+* Because prevention alone leaves no way to recognise a box that got into that
+  state under an older version, each build stamps the image and each overlay
+  records the stamp it mounted on. That is what `stale` means in `agentbox ls`,
+  what a launch quietly repairs, and what `agentbox remount` repairs on demand.
 
 The mount is deliberately conservative: `index=off,metacopy=off,redirect_dir=off,xino=off`.
 Those features change how the upper layer refers to lower files and interact
