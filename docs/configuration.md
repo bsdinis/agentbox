@@ -9,8 +9,10 @@ Two files, both optional, plus CLI overrides. Precedence, lowest to highest:
 
 Lists (`rw`, `ro`, `packages`, `pass_env`) **accumulate** across layers, keeping
 first-seen order and dropping duplicates. Tables (`env`) merge key by key.
-Scalars are replaced. So a project can add mounts but not remove the ones your
-global config insists on.
+Scalars are replaced. So a project can add mounts but not remove the ones the
+built-in defaults or your global config insist on - which also means there is
+no reason to restate them. `agentbox init` writes a file with the additions
+left blank, and `agentbox config` prints what a project actually resolves to.
 
 ## Keys
 
@@ -73,15 +75,16 @@ network = "host"
 
 packages = ["postgresql", "redis", "cargo-nextest"]
 
+# Added to the defaults above, not instead of them: ~/.gitconfig,
+# ~/.config/git and ~/.config/jj are mapped and TERM, COLORTERM and LANG
+# forwarded whether or not this file mentions them.
 rw = ["~/dev/shared-proto"]
 ro = [
-  "~/.gitconfig",
-  "~/.config/jj",
   "~/.cargo/registry",
   "~/dev/legacy-api",
 ]
 
-pass_env = ["TERM", "COLORTERM", "LANG", "ANTHROPIC_API_KEY"]
+pass_env = ["ANTHROPIC_API_KEY"]
 
 memory_max = "16G"
 cpu_quota  = "600%"

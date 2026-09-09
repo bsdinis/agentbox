@@ -85,8 +85,12 @@ lost_mounts() {
 
 echo 'reference material, do not edit' > "$REF/NOTES.md"
 cat > "$PROJ/.agentbox.toml" <<TOML
+# Pinned, not redundant: section 7 asserts the box reaches the network, and the
+# tester's global config is free to default to nat or none.
 network = "host"
-ro = ["~/.gitconfig", "~/.config/jj", "$REF"]
+# $REF only. ~/.gitconfig is a built-in default, and the git section below
+# checks the host identity applies, so it fails if that stops happening.
+ro = ["$REF"]
 TOML
 
 # ---------------------------------------------------------------- lifecycle

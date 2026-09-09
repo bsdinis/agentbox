@@ -10,14 +10,12 @@ rw = [
   "~/dev/shared-proto",
 ]
 
+# Added to the built-in read-only mounts (~/.gitconfig, ~/.config/git,
+# ~/.config/jj), not instead of them.
 ro = [
-  "~/.gitconfig",
-  "~/.config/jj",
   "~/.cargo/registry",   # warm crate cache without letting the box poison it
   "~/dev/legacy-api",    # reference implementation
 ]
-
-pass_env = ["TERM", "COLORTERM", "LANG"]
 
 memory_max = "16G"
 cpu_quota = "800%"

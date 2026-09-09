@@ -6,10 +6,8 @@ network = "none"
 
 packages = ["ruff", "mypy", "python-pytest"]
 
-ro = [
-  "~/.gitconfig",
-  "~/.config/jj",
-]
+# Nothing extra to map: ~/.gitconfig, ~/.config/git and ~/.config/jj come with
+# every box.
 
 memory_max = "8G"
 cpu_quota = "400%"

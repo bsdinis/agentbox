@@ -12,6 +12,10 @@ $ cp ~/dev/agentbox/examples/rust-workspace.agentbox.toml ~/dev/api/.agentbox.to
 | `node-monorepo.agentbox.toml` | pnpm monorepo, browser tests, `node_modules` kept inside the box |
 | `offline-review.agentbox.toml` | `network = "none"`, tools baked in at creation, for review and refactor tasks |
 
+Every box already has `~/.gitconfig`, `~/.config/git` and `~/.config/jj` mapped
+read-only and `TERM`, `COLORTERM` and `LANG` forwarded, so these files only list
+what a project needs on top. `agentbox config` prints the result.
+
 Replace `USER` in any path with your username, or use `~`, which expands to
 your home on the host side and the sandbox user's home inside the box — the
 same string, since the usernames match.

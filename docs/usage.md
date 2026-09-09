@@ -271,7 +271,7 @@ A reasonable default for unattended runs:
 network = "host"
 memory_max = "16G"
 cpu_quota = "600%"
-ro = ["~/.gitconfig", "~/.config/jj", "~/dev/reference"]
+ro = ["~/dev/reference"]   # on top of the built-in ~/.gitconfig and friends
 rw = []
 ```
 

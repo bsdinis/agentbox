@@ -51,9 +51,18 @@ pub fn init(dir: &Option<PathBuf>, force: bool) -> Result<()> {
     let template = format!(
         r#"# agentbox sandbox for {name}
 # The project directory itself is always mounted read-write at its real path.
+#
+# Every box already gets ~/.gitconfig, ~/.config/git and ~/.config/jj read-only
+# and TERM, COLORTERM and LANG forwarded, plus whatever
+# ~/.config/agentbox/config.toml adds. Lists here are added to those, so only
+# what this project needs on top belongs below. `agentbox config` prints the
+# result.
 
-# name = "{name}"                        # box name prefix
-network = "host"                          # host | none | nat
+# box name prefix; the default is this directory's name
+# name = "{name}"
+
+# host | none | nat
+# network = "host"
 
 # extra packages installed into this box the first time it is created
 packages = []
@@ -62,13 +71,10 @@ packages = []
 rw = []
 
 # read-only mounts: reference code, path dependencies, registries, dotfiles
-ro = [
-  "~/.gitconfig",
-  "~/.config/jj",
-]
+ro = []
 
-# environment variables forwarded from the host, if set
-pass_env = ["TERM", "COLORTERM", "LANG"]
+# extra environment variables forwarded from the host, if set
+# pass_env = ["ANTHROPIC_API_KEY"]
 
 [env]
 # RUST_BACKTRACE = "1"

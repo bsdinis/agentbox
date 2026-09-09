@@ -1,5 +1,5 @@
 # ~/.config/agentbox/config.toml - global defaults for every box.
-# Anything here can be overridden per project in that project's .agentbox.toml.
+# A project's .agentbox.toml replaces the scalars here and adds to the lists.
 
 # Packages baked into the shared base image. Changing this list needs
 # `agentbox build --refresh` (adds packages) or `--force` (rebuilds from scratch).
@@ -7,21 +7,23 @@
 #   "base", "base-devel", "sudo", "git", "jujutsu", "python", "nodejs", "npm",
 # ]
 
-[defaults]
-network = "host"          # host | none | nat
+# Lists here are added to the built-in defaults rather than replacing them, and
+# a project's .agentbox.toml adds to both. There is no way to subtract, so keep
+# this file to what every box on this host genuinely wants.
 
-# Read-only mounts every box gets. Keep credentials out of this list.
-ro = [
-  "~/.gitconfig",
-  "~/.config/jj",
-  "~/.config/git",
-]
+[defaults]
+# network = "host"        # host | none | nat
+
+# Read-only mounts every box gets, on top of the built-in ~/.gitconfig,
+# ~/.config/git and ~/.config/jj. Keep credentials out of this list.
+ro = []
 
 # Read-write mounts every box gets. Usually empty; the project dir is implicit.
 rw = []
 
-# Host environment variables forwarded into the box when they are set.
-pass_env = ["TERM", "COLORTERM", "LANG"]
+# Host environment variables forwarded into the box when they are set, on top
+# of the built-in TERM, COLORTERM and LANG.
+# pass_env = ["ANTHROPIC_API_KEY", "GITHUB_TOKEN"]
 
 # Resource caps applied to the container's systemd scope.
 # memory_max = "16G"

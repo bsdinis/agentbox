@@ -5,13 +5,12 @@ network = "host"
 
 packages = ["pnpm", "chromium"]
 
-ro = [
-  "~/.gitconfig",
-  "~/.config/jj",
-  "~/.npmrc",
-]
+# Added to the built-in read-only mounts (~/.gitconfig, ~/.config/git,
+# ~/.config/jj), not instead of them.
+ro = ["~/.npmrc"]
 
-pass_env = ["TERM", "COLORTERM", "LANG", "ANTHROPIC_API_KEY"]
+# Likewise added to the forwarded TERM, COLORTERM and LANG.
+pass_env = ["ANTHROPIC_API_KEY"]
 
 memory_max = "12G"
 
