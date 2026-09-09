@@ -407,18 +407,48 @@ pub fn create(sb: &Sandbox) -> Result<bool> {
     write_unit_caps(sb)?;
     write_unit_apparmor(sb)?;
     if fresh && !dry_run() {
+        // Only the network-free bootstrap runs here. Setting the login shell is
+        // a local write into the overlay; the configured `packages`, which need
+        // a working network, are installed after the box has booted (see
+        // `install_packages`) so they also work under nat.
         set_login_shell(sb)?;
-        if !sb.cfg.packages.is_empty() {
-            info(&format!(
-                "installing packages: {}",
-                sb.cfg.packages.join(" ")
-            ));
-            let mut cmd = argv!["/usr/bin/pacman", "-Sy", "--noconfirm", "--needed"];
-            cmd.extend(sb.cfg.packages.iter().map(crate::host::oss));
-            run_in(sb, cmd, Some("root"), Some("/"))?;
-        }
     }
     Ok(fresh)
+}
+
+/// Install the box's configured packages, once, into the freshly booted box.
+///
+/// This is deliberately *not* part of the pre-boot bootstrap: that runs the box
+/// as a transient `--as-pid2` payload with no network under nat, where
+/// networkd only brings `host0` up once the box actually boots. So the install
+/// is deferred to here, run through the same `systemd-run -M` attach path a
+/// session uses, once `wait_attachable`/`canary` have shown the box is up.
+///
+/// Gated on `fresh`, so it is a one-time step on creation like the login-shell
+/// bootstrap it moved out of. A non-zero `pacman` exit is fatal: a box missing
+/// its configured packages is broken, and continuing would surface later as a
+/// confusing "not found" for whatever those packages were meant to provide.
+pub fn install_packages(sb: &Sandbox, fresh: bool) -> Result<()> {
+    if !fresh || dry_run() || sb.cfg.packages.is_empty() {
+        return Ok(());
+    }
+    info(&format!(
+        "installing packages: {}",
+        sb.cfg.packages.join(" ")
+    ));
+    let mut cmd = argv!["/usr/bin/pacman", "-Sy", "--noconfirm", "--needed"];
+    cmd.extend(sb.cfg.packages.iter().map(crate::host::oss));
+    let code = attach(sb, cmd, "root", "/")?;
+    if code != 0 {
+        bail!(
+            "installing packages into box {} failed (pacman exited {code}); \
+             the box is booted but its configured packages are not all present. \
+             Fix `packages` in {PROJECT_FILE}, or install them by hand with \
+             `agentbox run --root -- pacman -S PKG`.",
+            sb.name,
+        );
+    }
+    Ok(())
 }
 
 fn write_meta(sb: &Sandbox) -> Result<()> {
@@ -1002,13 +1032,15 @@ pub fn teardown_ssh_agent(sb: &Sandbox) -> Result<()> {
 // bootstrap launch
 // --------------------------------------------------------------------------
 //
-// `run_in` runs a command in the box *before* it is ever booted: installing
-// the configured packages and setting the login shell while `create` is still
-// assembling the box. It launches nspawn directly, as PID 2 under a stub init,
-// which is right for a one-shot write into the overlay. Every launch a user
-// asks for goes the other way - it boots the box and attaches (see `attach`),
-// so resource caps live only on that booted unit's drop-in (`write_unit_caps`);
-// this bootstrap path is short-lived and uncapped.
+// `run_in` runs a command in the box *before* it is ever booted: setting the
+// login shell while `create` is still assembling the box. It launches nspawn
+// directly, as PID 2 under a stub init, which is right for a one-shot write
+// into the overlay. Only network-free bootstrap belongs here - the configured
+// packages, which need networkd up, are installed after boot instead (see
+// `install_packages`). Every launch a user asks for goes the other way - it
+// boots the box and attaches (see `attach`), so resource caps live only on that
+// booted unit's drop-in (`write_unit_caps`); this bootstrap path is short-lived
+// and uncapped.
 
 /// True only when stdin, stdout and stderr are all terminals.
 ///

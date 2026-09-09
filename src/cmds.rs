@@ -191,27 +191,33 @@ pub fn shell(
     cmd: &[String],
 ) -> Result<()> {
     let sb = load(dir, overrides)?;
-    nspawn::create(&sb)?;
+    let fresh = nspawn::create(&sb)?;
     let argv: Vec<OsString> = if cmd.is_empty() {
         argv![sb.shell(), "-l"]
     } else {
         cmd.iter().map(oss).collect()
     };
-    // After create, because a box being made now installs its `packages` on the
-    // way up and one of them may be what provides the payload.
-    if let Some(program) = argv.first() {
-        nspawn::check_payload(&sb, program)?;
-    }
+    // Cloned out of `argv` so the payload check can borrow the program name while
+    // `argv` itself is moved into `attach` at the end of the chain below.
+    let program = argv.first().cloned();
     let user = if as_root { "root" } else { &sb.user.name };
     let chdir = sb.project.to_string_lossy().into_owned();
 
-    // Boot-and-register, then prove the box is attachable before running the
-    // payload exactly once. release() runs whatever the outcome, so a failure
-    // between here and the attach does not leak a session or a box booted only
-    // to carry it.
+    // Boot-and-register, then prove the box is attachable, install a fresh box's
+    // packages, and check the payload is present - all before running it exactly
+    // once. The package install waits until here because a pre-boot install has
+    // no network under nat; and the payload check waits too, because those very
+    // packages may be what provides it. release() runs whatever the outcome, so
+    // a failure anywhere here leaks neither a session nor a box booted only to
+    // carry it.
     let handle = session::begin(&sb)?;
     let outcome = nspawn::wait_attachable(&sb)
         .and_then(|()| nspawn::canary(&sb, user))
+        .and_then(|()| nspawn::install_packages(&sb, fresh))
+        .and_then(|()| match &program {
+            Some(program) => nspawn::check_payload(&sb, program),
+            None => Ok(()),
+        })
         .and_then(|()| nspawn::attach(&sb, argv, user, &chdir));
     handle.release(&sb);
     // Exit with the payload's own code, as replacing the process used to.
@@ -223,8 +229,14 @@ pub fn shell(
 
 pub fn up(dir: &Option<PathBuf>, overrides: &Overrides) -> Result<()> {
     let sb = load(dir, overrides)?;
-    nspawn::create(&sb)?;
+    let fresh = nspawn::create(&sb)?;
     session::ensure_up(&sb)?;
+    // A fresh box installs its configured packages here, after boot, so the
+    // install has a working network even under nat. Prove the box is attachable
+    // first (riding out the logind lag with the canary), then install.
+    nspawn::wait_attachable(&sb)?;
+    nspawn::canary(&sb, &sb.user.name)?;
+    nspawn::install_packages(&sb, fresh)?;
     if !dry_run() {
         println!(
             "booted {}; open a shell with: agentbox shell --dir {}",
