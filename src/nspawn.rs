@@ -753,6 +753,80 @@ pub fn check_supported(sb: &Sandbox) -> Result<()> {
     bail!("{msg}")
 }
 
+/// A host UID/GID as it should be written on a box's mount point: IDs outside
+/// the container's own range have no meaning inside it, so they collapse onto
+/// container root.
+fn map_id(id: u32) -> u32 {
+    if id < UID_RANGE {
+        id
+    } else {
+        0
+    }
+}
+
+/// Create the ancestors of a mount point, each owned by someone the container
+/// can actually resolve.
+///
+/// `create_dir_all` leaves every directory it creates owned by *host* root, and
+/// host UID 0 is not in the box's shifted range - inside the box it is an
+/// unmapped owner (`nobody`) on a 0755 directory, so the sandbox user cannot
+/// write there. That is invisible until something tries: every dotfile bind
+/// hangs a fresh ancestor off the sandbox user's home - `~/.claude` for a
+/// credentials file, `~/.local`+`~/.local/share` for `~/.local/share/nvim/lazy`,
+/// `~/.config` for `~/.config/jj` - and the mount itself works, while the user
+/// can no longer create anything *beside* it. fish cannot write
+/// `~/.local/share/fish` ("Permission denied", no history), and claude cannot
+/// write the state it keeps next to the credentials file it was handed, so it
+/// asks to log in again.
+///
+/// agentbox spells paths identically inside and outside the box (see
+/// `base::setup_script`), so the host's own directory of the same name is the
+/// right model: mirror its owner when it exists, and fall back to container
+/// root when it does not.
+fn create_parents_mapped(sb: &Sandbox, parent: &Path) -> Result<()> {
+    let root = sb.root();
+    let rel = parent.strip_prefix(&root).with_context(|| {
+        format!(
+            "refusing to prepare {} outside the box rootfs {}",
+            parent.display(),
+            root.display()
+        )
+    })?;
+    let mut target = root.clone();
+    let mut on_host = PathBuf::from("/");
+    for component in rel.components() {
+        target.push(component);
+        on_host.push(component);
+        match fs::symlink_metadata(&target) {
+            // Already there and owned by someone in the box's range: the image
+            // made it, or an earlier launch did it right. Leave it alone.
+            Ok(meta) if self_owned(sb, meta.uid()) => continue,
+            // Already there and owned from outside the range - which nothing
+            // legitimate is, since the image is pre-shifted wholesale. This is
+            // a directory an older agentbox created with `create_dir_all` and
+            // left as host root, so repair it in place rather than making the
+            // fix apply only to boxes created from here on.
+            Ok(_) => {}
+            Err(_) => fs::create_dir(&target)
+                .with_context(|| format!("cannot create {}", target.display()))?,
+        }
+        let (uid, gid) = match fs::metadata(&on_host) {
+            Ok(meta) => (map_id(meta.uid()), map_id(meta.gid())),
+            Err(_) => (0, 0),
+        };
+        std::os::unix::fs::chown(&target, Some(sb.shift(uid)), Some(sb.shift(gid)))
+            .with_context(|| format!("cannot chown {}", target.display()))?;
+    }
+    Ok(())
+}
+
+/// Is `uid` one the box can resolve - that is, inside the range its image was
+/// shifted into? Everything else, host root included, shows up inside the box
+/// as an unmapped owner.
+fn self_owned(sb: &Sandbox, uid: u32) -> bool {
+    uid >= sb.cfg.uid_base && uid - sb.cfg.uid_base < UID_RANGE
+}
+
 /// `owneridmap` maps the host owner of the source onto *the owner of the
 /// destination inside the container*, so the mount point has to exist first,
 /// owned by the right container user.
@@ -781,7 +855,7 @@ fn prepare_mount_point(sb: &Sandbox, bind: &Bind) -> Result<()> {
     let meta =
         fs::metadata(&bind.src).with_context(|| format!("cannot stat {}", bind.src.display()))?;
     if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent)?;
+        create_parents_mapped(sb, parent)?;
     }
     if meta.is_dir() {
         if !target.exists() {
@@ -790,13 +864,10 @@ fn prepare_mount_point(sb: &Sandbox, bind: &Bind) -> Result<()> {
     } else if !target.exists() {
         fs::File::create(&target)?;
     }
-    // Host UIDs outside the container's own range have no meaning inside it;
-    // map those mounts onto container root instead.
-    let inside = |id: u32| if id < UID_RANGE { id } else { 0 };
     std::os::unix::fs::chown(
         &target,
-        Some(sb.shift(inside(meta.uid()))),
-        Some(sb.shift(inside(meta.gid()))),
+        Some(sb.shift(map_id(meta.uid()))),
+        Some(sb.shift(map_id(meta.gid()))),
     )
     .with_context(|| format!("cannot chown {}", target.display()))
 }
@@ -1100,9 +1171,8 @@ pub fn spawn_ssh_agent(sb: &Sandbox) -> Result<()> {
             String::from_utf8_lossy(&out.stderr).trim()
         );
     }
-    let pid = parse_agent_pid(&String::from_utf8_lossy(&out.stdout)).context(
-        "could not read the pid of the box-scoped ssh-agent from its output",
-    )?;
+    let pid = parse_agent_pid(&String::from_utf8_lossy(&out.stdout))
+        .context("could not read the pid of the box-scoped ssh-agent from its output")?;
     fs::write(sb.agent_pidfile(), format!("{pid}\n"))
         .with_context(|| format!("cannot write {}", sb.agent_pidfile().display()))?;
 
@@ -1656,14 +1726,14 @@ mod tests {
     /// either half would inject its own line into the file.
     #[test]
     fn an_env_value_with_a_newline_is_refused() {
-        assert!(reject_control_chars(
-            "an environment variable value",
-            "value\nCapability=all"
-        )
-        .is_err());
+        assert!(
+            reject_control_chars("an environment variable value", "value\nCapability=all").is_err()
+        );
         assert!(reject_control_chars("an environment variable name", "KEY\n[Files]").is_err());
         // An ordinary value is accepted.
-        assert!(reject_control_chars("an environment variable value", "some/value:with-colon").is_ok());
+        assert!(
+            reject_control_chars("an environment variable value", "some/value:with-colon").is_ok()
+        );
     }
 
     /// The A4 vector: an un-normalized `dst` with `..` would let `inside()`
@@ -1694,10 +1764,7 @@ mod tests {
         assert!(within_root(root, &root.join("home/me/project")));
         assert!(within_root(root, root));
         // What inside() would build for a `..` dst escapes and is rejected.
-        assert!(!within_root(
-            root,
-            &root.join("../../../home/me/i_win")
-        ));
+        assert!(!within_root(root, &root.join("../../../home/me/i_win")));
         assert!(!within_root(root, Path::new("/home/me/i_win")));
     }
 }

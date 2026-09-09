@@ -273,21 +273,62 @@ fn bootstrap(base: &Path) -> Result<()> {
 
     // Install scriptlets expect the kernel filesystems, as in a chroot.
     //
+    // /proc and /sys are rbound from the host: they are what the scriptlets
+    // actually need to read, and neither carries the kind of state a chown can
+    // damage. /run and /dev get a *fresh tmpfs* instead of a bind, because
+    // binding the host's would hand the host to the scriptlets: pacman's
+    // systemd install runs `systemd-tmpfiles --create` inside the chroot, and
+    // the rules in /usr/lib/tmpfiles.d are full of `/run` and `/dev` paths with
+    // an owner named by *user name*. Resolved against the image's /etc/passwd,
+    // those names give the image's IDs, and the chown then lands on the host's
+    // real files. That is not hypothetical: it chowned this host's
+    // /run/systemd/netif{,/links,/leases} to the image's `systemd-network`
+    // (977) while the host's own networkd runs as 979, so networkd lost write
+    // access to its own runtime state, could not configure the container veth,
+    // and every `network = "nat"` box came up with no address, no route and no
+    // NAT. It also took /run/uuidd, /run/tpm2-tss/eventlog and /dev/kvm's
+    // group. A throwaway tmpfs gives the scriptlets somewhere to write that
+    // nothing outside the build can see.
+    //
     // Each rbind is immediately made rslave. Without that the copied submounts
     // join the *peer group* of the host's own mounts - / is shared under
     // systemd - and the `umount -R` below propagates back out, tearing
     // /dev/pts, /dev/shm and /run/user/$UID off the running host. rslave lets
     // host mount events propagate inwards while nothing propagates outwards.
-    let api = ["proc", "sys", "dev", "run"];
+    let api = [
+        ("proc", Api::HostBind),
+        ("sys", Api::HostBind),
+        ("dev", Api::PrivateTmpfs),
+        ("run", Api::PrivateTmpfs),
+    ];
     let mut mounted: Vec<PathBuf> = Vec::new();
-    for dir in api {
+    for (dir, kind) in api {
         let target = base.join(dir);
-        let bind = sh(argv!["mount", "--rbind", format!("/{dir}"), &target])
+        let bind = match kind {
+            Api::HostBind => sh(argv!["mount", "--rbind", format!("/{dir}"), &target])
+                .quiet()
+                .run(),
+            Api::PrivateTmpfs => sh(argv![
+                "mount",
+                "-t",
+                "tmpfs",
+                "-o",
+                "mode=0755,nosuid",
+                format!("agentbox-{dir}"),
+                &target
+            ])
             .quiet()
-            .run();
+            .run(),
+        };
         if let Err(err) = bind {
             unmount_api(&mounted);
             return Err(err);
+        }
+        if kind == Api::PrivateTmpfs {
+            if let Err(err) = populate_dev(dir, &target) {
+                unmount_api(&mounted);
+                return Err(err);
+            }
         }
         let detached = sh(argv!["mount", "--make-rslave", &target])
             .quiet()
@@ -333,6 +374,93 @@ fn bootstrap(base: &Path) -> Result<()> {
     .run();
     unmount_api(&mounted);
     result.map(|_| ())
+}
+
+/// How one of the chroot's API filesystems is provided.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Api {
+    /// Recursively bound from the host: the scriptlets need to *read* the real
+    /// thing, and it holds nothing a chown can spoil.
+    HostBind,
+    /// A throwaway tmpfs. For /run and /dev, whose host copies are full of
+    /// paths that `systemd-tmpfiles --create` chowns by user *name* - resolved
+    /// against the image's /etc/passwd, so a bind would rewrite the host's own
+    /// files to the image's IDs.
+    PrivateTmpfs,
+}
+
+/// Give a freshly mounted tmpfs the bits a chroot's scriptlets expect.
+///
+/// /run only needs to be writable, which it already is. /dev needs the handful
+/// of nodes anything might open - /dev/null above all - since a tmpfs starts
+/// empty, where the host's /dev came fully populated. These are new nodes on a
+/// private tmpfs, so tmpfiles is welcome to chown them.
+fn populate_dev(dir: &str, target: &Path) -> Result<()> {
+    if dir != "dev" || dry_run() {
+        return Ok(());
+    }
+    // (name, mode, major, minor)
+    for (name, mode, major, minor) in [
+        ("null", "0666", 1, 3),
+        ("zero", "0666", 1, 5),
+        ("full", "0666", 1, 7),
+        ("random", "0666", 1, 8),
+        ("urandom", "0666", 1, 9),
+        ("tty", "0666", 5, 0),
+        ("console", "0600", 5, 1),
+    ] {
+        sh(argv![
+            "mknod",
+            "-m",
+            mode,
+            target.join(name),
+            "c",
+            major.to_string(),
+            minor.to_string()
+        ])
+        .quiet()
+        .run()
+        .with_context(|| format!("cannot create /dev/{name} in the image"))?;
+    }
+    for (link, dest) in [
+        ("fd", "/proc/self/fd"),
+        ("stdin", "/proc/self/fd/0"),
+        ("stdout", "/proc/self/fd/1"),
+        ("stderr", "/proc/self/fd/2"),
+    ] {
+        std::os::unix::fs::symlink(dest, target.join(link))
+            .with_context(|| format!("cannot link /dev/{link} in the image"))?;
+    }
+    for sub in ["pts", "shm"] {
+        fs::create_dir_all(target.join(sub))?;
+    }
+    sh(argv![
+        "mount",
+        "-t",
+        "devpts",
+        "-o",
+        "mode=0620,gid=5,nosuid,noexec",
+        "agentbox-devpts",
+        target.join("pts")
+    ])
+    .quiet()
+    .run()
+    .context("cannot mount devpts in the image")?;
+    sh(argv![
+        "mount",
+        "-t",
+        "tmpfs",
+        "-o",
+        "mode=1777,nosuid,nodev",
+        "agentbox-shm",
+        target.join("shm")
+    ])
+    .quiet()
+    .run()
+    .context("cannot mount /dev/shm in the image")?;
+    std::os::unix::fs::symlink("/dev/pts/ptmx", target.join("ptmx"))
+        .context("cannot link /dev/ptmx in the image")?;
+    Ok(())
 }
 
 /// One `KEY="value"` field out of a `findmnt -P` line. That format is used in
