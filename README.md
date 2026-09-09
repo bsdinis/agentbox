@@ -32,6 +32,7 @@ $ agentbox shell                # you are now inside the sandbox
 * [docs/usage.md](docs/usage.md) — the user guide: daily workflow, packages, VCS, agents
 * [docs/configuration.md](docs/configuration.md) — every config key and CLI flag
 * [docs/design.md](docs/design.md) — how it works and what the isolation actually buys you
+* [docs/security.md](docs/security.md) — the trust model: read-write mounts, and running Claude in a box
 * [docs/troubleshooting.md](docs/troubleshooting.md) — when something breaks
 * [examples/](examples/) — ready-made `.agentbox.toml` files
 
@@ -119,6 +120,22 @@ State on disk:
 /etc/systemd/nspawn/<box>.nspawn        generated settings: binds, UID map, network
 /etc/systemd/system/systemd-nspawn@<box>.service.d/  resource caps, and the AppArmor profile when loaded, on the box's unit
 ```
+
+## Upgrading
+
+Two recent changes are **not** backward compatible:
+
+* **The default network is now `nat`, not `host`.** By default a box no longer shares the
+  host's network namespace: it still reaches the internet (via NAT), but it can no longer reach
+  services on the host's `localhost`. If a box needs to talk to something running on the host — a
+  local database, say — set `network = "host"` in its `.agentbox.toml`. `nat` requires
+  `systemd-networkd` enabled on the host; see [docs/usage.md](docs/usage.md#networking). The reason
+  for the change: host networking also exposes the host's loopback services and abstract sockets
+  (such as the X11 display) to the box — see [docs/security.md](docs/security.md).
+* **`ssh_agent` is replaced by `ssh_keys`.** Forwarding the host's entire agent is gone; list the
+  specific keys a box may use instead (`ssh_keys = ["~/.ssh/id_ed25519_x"]`) and agentbox forwards
+  a box-scoped agent holding only those (added with `ssh-add -c`, confirm-on-use). A leftover
+  `ssh_agent` key is rejected at load with a message pointing at `ssh_keys`.
 
 ## Caveats
 

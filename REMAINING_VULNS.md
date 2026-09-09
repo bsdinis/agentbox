@@ -3,15 +3,20 @@
 Working doc for the vectors from the breakout red-team (full detail in
 `BREAKOUT_REPORT.md`). Fill in the **Decision / mitigation** blocks as you triage.
 
-**Already closed (code fixes, this branch):**
+**Closed** — implemented on the `worktree-multi-session` line; `cargo build` + `cargo test` (44) green:
 - A1 — control-char/newline injection into the generated `.nspawn` file → *fixed*
 - A4 — bind `dst` path-traversal → create/chown outside rootfs as root → *fixed*
 - A3 — overbroad bind source (`/`, host home, ancestor) → *fixed*
+- S1 — ssh-agent forwarding → box-scoped agent, authorized keys only (`ssh_keys`) → *fixed*
+- B3 — no LSM → optional AppArmor profile, fail-soft → *fixed*
+- G1 — `.git/hooks` executes on host → `agentbox init` maps it read-only for git projects → *fixed*
+- A5 / B2 — host-net exposure (X11, host localhost) → **`nat` is now the default** → *fixed*
+- A2 / C1 / B1 / G2 — rw-mount / `.claude` trust boundary → *documented* in `docs/security.md` (config, not code)
 
-**In progress (decided, not tracked here):**
-- G1 — `.git/hooks` executes on host → `agentbox init` maps `.git/hooks` read-only when `.git` is detected. **Status: ✅ DONE, integrated — `init` emits ro `.git/hooks` for git projects (needs host `cargo test`).**
+Host **runtime** testing is still recommended (nat connectivity + first-run package install, the
+box-scoped ssh-agent lifecycle, and the AppArmor drop-in); compile and unit tests pass in-box.
 
-Everything below is **still open**. The through-line: none is a namespace-containment
+The detail below is retained for reference. The through-line: none was a namespace-containment
 failure — each is a *trust boundary* where the box writes data (or shares a network) that a
 **host process later consumes**.
 
@@ -172,7 +177,7 @@ So NAT keeps the internet and closes A5 + B2. If NAT-as-default is OK with you, 
 an agent to make it the default + document the host-net exposure.
 
 Decision: make nat the default
-**Status (Claude):** ⏸ PARKED — implemented in worktree `net-nat`, but the worker found nat-default breaks non-booted `shell`/`run` (no network) and create-time `pacman` installs (run before boot). Awaiting your call: ship-with-caveats / hold / add booted-install fix.
+**Status (Claude):** ✅ DONE — `nat` is the default (src/config.rs). The multi-session boot model + install-packages-after-boot close the old shell/run and create-time-install gaps; `host` remains an explicit opt-in. Build + tests green; also closes B2. (Host runtime test recommended.)
 &nbsp;
 
 ---
@@ -187,7 +192,9 @@ fingerprinted or attacked.
 document which loopback services become reachable.
 
 **Reply (Claude):** No separate decision needed — B2 is closed by the same networking choice as A5
-(default to `nat`). Blocked only on the A5 decision above.
+(default to `nat`).
+
+**Status (Claude):** ✅ DONE — closed by the `nat` default (see A5).
 
 **Decision / mitigation / notes:**
 <!-- write here -->
@@ -248,6 +255,8 @@ Decision: spin off a worker to implement this in a worktree
 
 ---
 
-### Two changes cover most of the table
-1. **Stop rw-mounting `~/.claude` + treat the rw project bind as tainted** → A2, C1, B1 (and G1/G2).
-2. **Default to private/NAT networking** → A5, B2.
+### Two changes covered most of the table — status
+1. **rw-mount / `.claude` trust boundary** → A2, C1, B1, G2 documented in `docs/security.md`; the
+   automatable slice — `.git/hooks` read-only (G1) — is implemented. `.cargo`/`build.rs` (G2) stay
+   documented (no clean code fix; copy-mode rejected).
+2. **Default to private/NAT networking** → A5, B2 → **done** (`nat` is the default).
