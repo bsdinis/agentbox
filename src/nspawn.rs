@@ -81,6 +81,57 @@ fn escape(path: &Path) -> String {
         .replace(':', r"\:")
 }
 
+/// systemd-nspawn currently lets a container use every socket address family,
+/// but warns on every launch that a future version will narrow the default to
+/// AF_INET, AF_INET6 and AF_UNIX, and asks to be told which it should be.
+///
+/// Say "all of them", explicitly. Narrowing would be the wrong default here: a
+/// box is a working dev machine, and AF_NETLINK alone is what `ip`, `ss`, udev,
+/// glibc's resolver and - in nat mode - the container's own networkd all need.
+/// The isolation agentbox actually relies on is the user namespace and the
+/// mount plan, not a socket filter. Stating it also pins today's behaviour
+/// across the version where the default changes.
+///
+/// The setting and the warning both arrived in systemd 261, so on anything
+/// older it is omitted: there is no warning to silence, and an unknown key in a
+/// .nspawn file only earns a different complaint.
+const RESTRICT_ADDRESS_FAMILIES_SINCE: u32 = 261;
+
+/// Written to both places it can go, for different reasons: the settings file
+/// is all a booted box reads, and the command line is what was measured to
+/// silence the notice on the launches a person actually watches. Both are
+/// omitted below 261, where the flag is an unrecognised option and the key an
+/// unknown setting.
+fn address_families(sb: &Sandbox) -> Option<String> {
+    (systemd_version()? >= RESTRICT_ADDRESS_FAMILIES_SINCE)
+        .then(|| sb.cfg.address_families.clone().unwrap_or_default())
+}
+
+/// The major version of the systemd on this host, from `systemd-nspawn
+/// --version` - probed directly rather than through `sh`, which reports
+/// nothing under `--dry-run`, and which would log a line per call.
+fn systemd_version() -> Option<u32> {
+    static VERSION: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
+    *VERSION.get_or_init(|| {
+        let out = std::process::Command::new("systemd-nspawn")
+            .arg("--version")
+            .output()
+            .ok()?;
+        parse_systemd_version(&String::from_utf8_lossy(&out.stdout))
+    })
+}
+
+/// `systemd 261 (261.2-1-arch)` -> 261.
+fn parse_systemd_version(output: &str) -> Option<u32> {
+    output
+        .lines()
+        .next()?
+        .split_whitespace()
+        .nth(1)?
+        .parse()
+        .ok()
+}
+
 /// One source of truth for both `agentbox shell` (which runs nspawn directly)
 /// and `agentbox up` (which goes through systemd-nspawn@.service).
 pub fn settings_text(sb: &Sandbox) -> String {
@@ -101,6 +152,9 @@ pub fn settings_text(sb: &Sandbox) -> String {
         Network::None => "ResolvConf=off\n",
         _ => "ResolvConf=copy-host\n",
     });
+    if let Some(families) = address_families(sb) {
+        out.push_str(&format!("RestrictAddressFamilies={families}\n"));
+    }
     for (key, value) in sb.env() {
         out.push_str(&format!("Environment={key}={value}\n"));
     }
@@ -608,6 +662,11 @@ fn launch_argv(
         Some(color) => args.push(crate::host::oss(format!("--background={color}"))),
         None => args.push(crate::host::oss("--background=")),
     }
+    if let Some(families) = address_families(sb) {
+        args.push(crate::host::oss(format!(
+            "--restrict-address-families={families}"
+        )));
+    }
     // The man page's caution about handing file descriptors to the payload is
     // the reason this is conditional: pipe mode is chosen precisely when they
     // are not terminals. A terminal stdin can still be passed through when
@@ -750,6 +809,19 @@ mod tests {
             ),
             Some(PathBuf::from("/home/me/project/task"))
         );
+    }
+
+    #[test]
+    fn the_systemd_major_version_is_read_from_its_banner() {
+        assert_eq!(
+            parse_systemd_version("systemd 261 (261.2-1-arch)\n+PAM +AUDIT\n"),
+            Some(261)
+        );
+        assert_eq!(parse_systemd_version("systemd 256 (256)\n"), Some(256));
+        // Never guess: an unreadable banner means the setting is left out.
+        assert_eq!(parse_systemd_version(""), None);
+        assert_eq!(parse_systemd_version("systemd\n"), None);
+        assert_eq!(parse_systemd_version("systemd v261\n"), None);
     }
 
     #[test]

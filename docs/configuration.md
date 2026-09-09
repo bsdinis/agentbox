@@ -29,6 +29,7 @@ left blank, and `agentbox config` prints what a project actually resolves to.
 | `ssh_agent` | bool | `false` | Bind `$SSH_AUTH_SOCK` to `~/.agentbox/ssh-agent.sock` and export it. |
 | `shell` | path | your host shell if present in the image, else `/bin/bash` | Login shell inside the box. |
 | `background` | string | unset | Terminal background while the box runs. Unset means no tint, so the terminal keeps its own colour. `"auto"` restores systemd-nspawn's blue tint; an ANSI SGR background (`"40"`..`"47"`, `"48;5;N"`, `"48;2;R;G;B"`) picks a specific one. |
+| `address_families` | string | unset | Socket address families the box may use, as `RestrictAddressFamilies=`. Unset applies no filter and says so explicitly. Space-separated names (`"AF_INET AF_INET6 AF_UNIX AF_NETLINK"`), `~` to prohibit one, or `"none"`. Needs systemd 261; omitted below that. |
 | `memory_max` | string | unset | `MemoryMax=` on the container scope, e.g. `"16G"`. |
 | `cpu_quota` | string | unset | `CPUQuota=`, e.g. `"400%"`. |
 | `tasks_max` | string | unset | `TasksMax=`. |
@@ -39,6 +40,12 @@ applied in the two places a box can be launched from: `run` and `shell` start
 the container inside a transient scope of their own carrying the caps, and
 `up` gets a drop-in on its `systemd-nspawn@` instance. `agentbox rm` removes
 the drop-in.
+
+`address_families` goes to both places it can: `RestrictAddressFamilies=` in the
+settings file, which is all a booted box reads, and `--restrict-address-families=`
+on the direct launches, which is what silences systemd-nspawn's notice about the
+coming default. Both need systemd 261 and are left out below it, where the notice
+does not exist either.
 
 `background` is a `systemd-nspawn` command-line flag with no `.nspawn` settings
 key, so it is passed by `run` and `shell` only. `up` needs none: a booted box is
@@ -111,7 +118,6 @@ Three consequences worth knowing:
   claimed before either list — can never be made read-only as a whole. Making a
   subdirectory of the project read-only does work, since that is nesting:
   `ro = ["~/dev/api/vendor"]`.
-
 
 ## Project file example
 

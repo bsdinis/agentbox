@@ -81,6 +81,11 @@ ro = []
 # background such as "48;5;52" picks your own.
 # background = "auto"
 
+# socket address families the box may use. Unset means no filtering at all,
+# which is what a dev box wants: AF_NETLINK alone is needed by ip, ss, udev and
+# glibc's resolver.
+# address_families = "AF_INET AF_INET6 AF_UNIX AF_NETLINK"
+
 # resource caps enforced by systemd on the container scope
 # memory_max = "8G"
 # cpu_quota  = "400%"
@@ -305,6 +310,7 @@ fn effective_toml(sb: &Sandbox) -> String {
         env,
         ssh_agent,
         background,
+        address_families,
         memory_max,
         cpu_quota,
         tasks_max,
@@ -323,6 +329,10 @@ fn effective_toml(sb: &Sandbox) -> String {
     match background {
         Some(v) => out.push_str(&format!("background = {v:?}\n")),
         None => out.push_str("# background unset (terminal keeps its own colour)\n"),
+    }
+    match address_families {
+        Some(v) => out.push_str(&format!("address_families = {v:?}\n")),
+        None => out.push_str("# address_families unset (no filtering)\n"),
     }
     out.push_str(&format!("uid_base = {uid_base}\n"));
     for (key, value) in [

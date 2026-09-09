@@ -51,6 +51,18 @@ Older versions let systemd-nspawn discover this instead, which surfaced as
 `execv(claude) failed: No such file or directory` after the box was already
 created, its login shell set and its packages installed.
 
+## `Note: in a future version of systemd-nspawn ... socket address families`
+
+Gone as of the `address_families` setting: agentbox now states the policy
+explicitly rather than leaving systemd-nspawn to warn that its default is about
+to change. If you still see it, the box was created by an older agentbox and its
+settings file is stale — any `agentbox run`, `shell` or `up` rewrites it.
+
+The default is no filtering, which is deliberate. Narrowing to AF_INET, AF_INET6
+and AF_UNIX — what systemd intends to default to — breaks `ip`, `ss`, `udev`,
+glibc's resolver and, in `nat` mode, the container's own networkd, all of which
+need `AF_NETLINK`. Set `address_families` if you want the restriction anyway.
+
 ## `cargo build` fails
 
 ```console

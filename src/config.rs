@@ -108,6 +108,7 @@ pub struct Layer {
     pub ssh_agent: Option<bool>,
     pub shell: Option<String>,
     pub background: Option<String>,
+    pub address_families: Option<String>,
     pub memory_max: Option<String>,
     pub cpu_quota: Option<String>,
     pub tasks_max: Option<String>,
@@ -129,6 +130,10 @@ pub struct Config {
     /// Terminal background while the box runs. `None` - the default - means no
     /// tint at all, leaving the terminal the colour it already was.
     pub background: Option<String>,
+    /// Socket address families the box may use. `None` - the default - means
+    /// no filtering, stated explicitly so the coming systemd default does not
+    /// silently apply one.
+    pub address_families: Option<String>,
     pub memory_max: Option<String>,
     pub cpu_quota: Option<String>,
     pub tasks_max: Option<String>,
@@ -151,6 +156,7 @@ impl Default for Config {
             ssh_agent: false,
             shell: None,
             background: None,
+            address_families: None,
             memory_max: None,
             cpu_quota: None,
             tasks_max: None,
@@ -177,6 +183,7 @@ impl Config {
         self.hostname = layer.hostname.or(self.hostname.take());
         self.shell = layer.shell.or(self.shell.take());
         self.background = layer.background.or(self.background.take());
+        self.address_families = layer.address_families.or(self.address_families.take());
         self.memory_max = layer.memory_max.or(self.memory_max.take());
         self.cpu_quota = layer.cpu_quota.or(self.cpu_quota.take());
         self.tasks_max = layer.tasks_max.or(self.tasks_max.take());
@@ -252,6 +259,7 @@ pub fn load(project: &Path, overrides: &Overrides) -> Result<Config> {
         ..Layer::default()
     });
     check_background(cfg.background.as_deref())?;
+    check_address_families(cfg.address_families.as_deref())?;
     Ok(cfg)
 }
 
@@ -270,6 +278,33 @@ fn check_background(value: Option<&str>) -> Result<()> {
          - \"40\" to \"47\", \"48;5;N\" or \"48;2;R;G;B\" (got {value:?}). \
          Remove the key to leave the terminal its own colour."
     )
+}
+
+/// Address family names, as systemd spells them: `AF_INET`, `~AF_PACKET` to
+/// prohibit one, or the special value `none`. Empty means no filtering.
+fn check_address_families(value: Option<&str>) -> Result<()> {
+    let Some(value) = value else { return Ok(()) };
+    let ok = |token: &str| {
+        token == "none"
+            || token
+                .strip_prefix('~')
+                .unwrap_or(token)
+                .strip_prefix("AF_")
+                .is_some_and(|rest| {
+                    !rest.is_empty()
+                        && rest
+                            .bytes()
+                            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+                })
+    };
+    if let Some(bad) = value.split_whitespace().find(|t| !ok(t)) {
+        bail!(
+            "address_families takes systemd address family names such as \
+             \"AF_INET AF_INET6 AF_UNIX AF_NETLINK\", \"~AF_PACKET\" to prohibit one, \
+             or \"none\" (got {bad:?}). Remove the key to leave the box unfiltered."
+        );
+    }
+    Ok(())
 }
 
 /// Packages for the shared base image: `base_packages` at the top level, or

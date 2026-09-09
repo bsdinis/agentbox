@@ -34,6 +34,13 @@ rw = []
 # has it, otherwise /bin/bash.
 # shell = "/usr/bin/fish"
 
+# Socket address families every box may use, as RestrictAddressFamilies=.
+# Unset - the default - applies no filter and says so explicitly, which is what
+# stops systemd-nspawn 261+ warning that a future release will narrow the
+# default to AF_INET, AF_INET6 and AF_UNIX. Narrowing breaks ip, ss, udev and
+# glibc's resolver, all of which need AF_NETLINK.
+# address_families = "AF_INET AF_INET6 AF_UNIX AF_NETLINK"
+
 # Terminal background while a box runs. Unset - the default - leaves the
 # terminal whatever colour it already was. "auto" restores systemd-nspawn's own
 # blue tint; an ANSI SGR background such as "48;5;52" picks your own.
