@@ -37,6 +37,13 @@ rw = []
 # cpu_quota  = "800%"
 # tasks_max  = "4096"
 
+# AppArmor confinement, a defense-in-depth LSM layer behind the user namespace,
+# seccomp and mount plan. Unset - the default - applies the shipped profile when
+# it is loaded on this host and does nothing otherwise, so it never breaks a box.
+# Set false to opt out, or true to be warned when the profile is expected but not
+# loaded. See contrib/apparmor/README.md to install and load it (per-distro).
+# apparmor = true
+
 # Login shell inside the box. Defaults to your host shell if the base image
 # has it, otherwise /bin/bash.
 # shell = "/usr/bin/fish"

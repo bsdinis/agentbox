@@ -142,6 +142,16 @@ What the boundary actually is:
   `MemoryMax=`/`CPUQuota=`/`TasksMax=` on the container's scope.
 * **seccomp.** nspawn's default filter blocks the usual dangerous syscall
   families (`kexec_load`, `open_by_handle_at`, raw `bpf`, and so on).
+* **AppArmor (optional, defense in depth).** None of the above is a mandatory
+  -access-control layer, so a future capability, mount or namespace regression
+  would have no second wall. An optional AppArmor profile
+  ([contrib/apparmor/](../contrib/apparmor/)) is that wall: it denies a small set
+  of host-catastrophic operations no box needs (loading kernel modules, writing
+  `/boot`, raw disk access, altering LSM policy, `/dev/mem`, magic SysRq, ...),
+  independent of uid/caps/namespaces. agentbox applies it — to the direct-launch
+  scope and to the booted-box unit — only when the profile is loaded, and always
+  best-effort (a leading `-`), so it never turns into a launch gate. It targets
+  AppArmor because the host distro (Arch) ships AppArmor, not SELinux.
 
 What it is not:
 

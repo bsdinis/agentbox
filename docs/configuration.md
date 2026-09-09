@@ -33,6 +33,7 @@ left blank, and `agentbox config` prints what a project actually resolves to.
 | `memory_max` | string | unset | `MemoryMax=` on the container scope, e.g. `"16G"`. |
 | `cpu_quota` | string | unset | `CPUQuota=`, e.g. `"400%"`. |
 | `tasks_max` | string | unset | `TasksMax=`. |
+| `apparmor` | bool | unset | Apply the shipped AppArmor profile as a defense-in-depth LSM layer. Unset means on-if-available: applied when the profile is loaded on the host, silently skipped otherwise. `true` also warns when it is expected but unavailable; `false` opts out. See below and [contrib/apparmor/README.md](../contrib/apparmor/README.md). |
 | `uid_base` | int | `1310720000` | Host UID that container UID 0 maps to. Multiple of 65536. Only meaningful before `agentbox build`. |
 
 The three caps are unit properties rather than container settings. Every launch
@@ -51,6 +52,20 @@ does not exist either.
 interactive `shell`/`run` attach — the session a person watches. A redirected
 (`--pipe`) run and the bootstrap install have no terminal to colour and get the
 "no tint" default; `up` attaches no session at all.
+
+`apparmor` is, like the caps, a unit property with nowhere to go in the `.nspawn`
+file, so it is applied in the same two places: `run` and `shell` add
+`--property=AppArmorProfile=-agentbox-nspawn` to the transient scope the box runs
+in, and `up` gets a `60-agentbox-apparmor.conf` drop-in on its
+`systemd-nspawn@` instance. Both use the leading `-`, which makes application
+non-fatal, and agentbox only wires the profile in when it is actually loaded on
+the host, so a box never refuses to launch because the LSM layer is missing —
+this is defense in depth, not a gate. The profile confines the `systemd-nspawn`
+process and, by inheritance, the box's own init and everything it runs; what it
+denies and how to install it (per-distro — AppArmor, not SELinux) is in
+[contrib/apparmor/README.md](../contrib/apparmor/README.md). `--dry-run` only
+shows the profile when run from a context that can read the kernel's loaded-
+profile list (i.e. as root), since that list is root-readable.
 
 Global-config-only:
 
@@ -186,4 +201,4 @@ it in `.agentbox.toml`.
 | `/var/lib/agentbox/boxes/<box>/ssh-agent/` | Present only with `ssh_keys` set: the box-scoped ssh-agent's socket and pid, mode 0700, owned by you. Torn down by `down`, `reset` and `rm`. |
 | `/var/lib/machines/<box>` | Mount point of the assembled rootfs. |
 | `/etc/systemd/nspawn/<box>.nspawn` | Generated settings. Regenerated on every launch — edit the TOML, not this. |
-| `/etc/systemd/system/systemd-nspawn@<box>.service.d/` | Generated drop-in carrying the resource caps for booted mode. Removed by `agentbox rm`. |
+| `/etc/systemd/system/systemd-nspawn@<box>.service.d/` | Generated drop-ins for booted mode: `50-agentbox-caps.conf` (resource caps) and, when the AppArmor profile is loaded, `60-agentbox-apparmor.conf`. Removed by `agentbox rm`. |

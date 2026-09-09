@@ -1,0 +1,98 @@
+# AppArmor profile for the systemd-nspawn payload of an agentbox box.
+#
+# This is a *second wall*. A box is already contained by a user namespace (root
+# inside is an unprivileged host UID), an empty ambient capability set, the
+# systemd-nspawn seccomp filter and the mount plan. None of those is an LSM, so
+# a future capability/mount/namespace regression would have no mandatory-access
+# -control layer behind it. This profile is that layer: it denies a small set of
+# host-catastrophic operations that no box workflow needs, so they stay blocked
+# even if the primary containment ever slips.
+#
+# ---------------------------------------------------------------------------
+# IMPORTANT, read before enforcing
+# ---------------------------------------------------------------------------
+# * agentbox applies this profile to the systemd-nspawn process. That profile is
+#   inherited across exec, so it also confines the container's own PID 1 and
+#   everything the box runs. After nspawn pivots into the box rootfs, the paths
+#   below that name host devices and host trees (/boot, /dev/sd*, ...) are simply
+#   not visible inside the box, which is *why* denying them does not break normal
+#   box use - they bite only if the box could somehow see the host's real
+#   objects again.
+# * File and mount access is deliberately broad. A dev box runs arbitrary
+#   toolchains and nspawn itself needs to mount, pivot_root and create devices,
+#   so the value here is in the deny-list, not in restricting ordinary use.
+# * This host could not be tested by the author (no AppArmor at authoring time).
+#   Treat it as a starting point. LOAD IT IN COMPLAIN MODE FIRST, exercise a box
+#   (`agentbox shell`, a build, `sudo pacman -Syu`, git/jj, an agent), then read
+#   the audit log with `aa-logprof` / `dmesg | grep -i apparmor` before switching
+#   to enforce. See contrib/apparmor/README.md.
+#
+# The `profile` name below MUST stay in sync with APPARMOR_PROFILE in
+# src/nspawn.rs (currently "agentbox-nspawn").
+
+#include <tunables/global>
+
+profile agentbox-nspawn flags=(attach_disconnected,mediate_deleted) {
+
+  # ---- broad grants nspawn and a dev box legitimately need ----
+
+  # Capabilities are namespaced, but AppArmor still mediates them; nspawn needs a
+  # wide set to build a container, so allow by default and carve out the few that
+  # are never legitimate below.
+  capability,
+
+  network,            # a dev box talks to the world; host/nat/none is enforced
+                      # by the network namespace, not here
+  unix,
+  dbus,
+
+  # nspawn's container setup: bind/move mounts, remounts, and the pivot into the
+  # box rootfs. Left permissive on purpose - a tighter mount policy is the most
+  # likely thing to break nspawn, and hardest to get right without testing.
+  mount,
+  umount,
+  remount,
+  pivot_root,
+
+  ptrace,             # strace inside the box, and nspawn supervising its child
+  signal,
+
+  # Broad file access. After pivot_root these paths are the box's own overlay,
+  # not the host, so the confinement value is the deny-list, not this line.
+  file,
+  # Keep the profile across exec so the whole box stays confined (rather than a
+  # program escaping into an unconfined transition).
+  /{,**} ix,
+
+  # ---- targeted denials: the actual second wall ----
+  # Explicit deny wins over the broad grants above. Each of these is a
+  # host-catastrophic operation with no legitimate use from inside a box.
+
+  deny capability sys_module,           # (un)loading kernel modules
+  deny capability sys_rawio,            # raw port / /dev/mem-class I/O
+  deny capability sys_time,             # setting the host clock
+  deny capability sys_boot,             # reboot / kexec
+  deny capability mac_admin,            # loading or altering LSM policy
+  deny capability mac_override,         # bypassing LSM policy
+
+  deny /boot/**                wkl,     # host bootloader and kernels
+  deny /sys/firmware/**        wkl,     # EFI variables, ACPI tables
+  deny /sys/kernel/security/** wkl,     # securityfs, incl. the AppArmor policy
+                                        # that defines this very wall
+  deny @{PROC}/sysrq-trigger   w,       # magic SysRq
+  deny @{PROC}/kcore           r,       # a window onto all of kernel memory
+  deny @{PROC}/sys/kernel/{kexec_load,modprobe,modules_disabled,sysrq,core_pattern} w,
+
+  deny /dev/mem   rw,
+  deny /dev/kmem  rw,
+  deny /dev/port  rw,
+
+  # Raw whole-disk and partition writes. A box has no business writing block
+  # devices directly; loop devices (/dev/loop*) are intentionally NOT denied, so
+  # image-building workflows that need them still work.
+  deny /dev/sd[a-z]*   wkl,
+  deny /dev/nvme*      wkl,
+  deny /dev/vd[a-z]*   wkl,
+  deny /dev/mapper/**  wkl,
+  deny /dev/dm-*       wkl,
+}

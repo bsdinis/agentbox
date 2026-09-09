@@ -35,6 +35,25 @@ case ":$PATH:" in
   *) echo "warning: $bindir is not on your PATH" >&2 ;;
 esac
 
+# Optional AppArmor hardening. Only mention it where AppArmor tooling exists;
+# loading the profile needs root and is left to the user (test in complain mode
+# first). agentbox runs fine without it - this is defense in depth, not a gate.
+if command -v apparmor_parser >/dev/null; then
+  cat <<MSG
+
+Optional: an AppArmor profile ships in contrib/apparmor/ as a second wall behind
+the user namespace, seccomp and mount plan. agentbox applies it automatically
+once it is loaded. Test it in complain mode first:
+
+  sudo install -Dm644 "$src/contrib/apparmor/agentbox-nspawn" \\
+    /etc/apparmor.d/agentbox-nspawn
+  sudo apparmor_parser -r -C /etc/apparmor.d/agentbox-nspawn   # complain mode
+  # exercise a box, review: sudo aa-logprof ; then: sudo aa-enforce agentbox-nspawn
+
+See contrib/apparmor/README.md for the full walkthrough.
+MSG
+fi
+
 cat <<MSG
 
 Next:

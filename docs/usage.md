@@ -222,6 +222,24 @@ $ systemctl show -p MemoryMax -p CPUQuotaPerSecUSec -p TasksMax \
     systemd-nspawn@<box>.service
 ```
 
+## Hardening with AppArmor
+
+Beyond the user namespace, empty capability set, seccomp filter and mount plan,
+agentbox can apply an optional AppArmor profile as a mandatory-access-control
+second wall — it stays up even if one of the other layers regresses. It ships in
+[contrib/apparmor/](../contrib/apparmor/), targets AppArmor (so Arch/Debian/
+Ubuntu/SUSE, not SELinux distros), and is off until you load it:
+
+```console
+$ sudo install -Dm644 contrib/apparmor/agentbox-nspawn /etc/apparmor.d/agentbox-nspawn
+$ sudo apparmor_parser -r -C /etc/apparmor.d/agentbox-nspawn   # complain mode first
+```
+
+Once loaded, agentbox applies it automatically (the `apparmor` key defaults to
+on-if-available) and still launches fine without it. Test in complain mode and
+review `sudo aa-logprof` before `sudo aa-enforce` — see
+[contrib/apparmor/README.md](../contrib/apparmor/README.md).
+
 ## One box, several sessions
 
 A box is a booted machine: `shell` or `run` boots it (systemd as PID 1 inside,

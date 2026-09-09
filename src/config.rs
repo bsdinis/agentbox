@@ -114,6 +114,11 @@ pub struct Layer {
     pub memory_max: Option<String>,
     pub cpu_quota: Option<String>,
     pub tasks_max: Option<String>,
+    /// Apply the shipped AppArmor profile as a defense-in-depth LSM layer.
+    /// `None` - the default - means on-if-available: apply it when it is loaded
+    /// on the host, and stay silent otherwise. `Some(true)` also warns when it
+    /// is unavailable; `Some(false)` opts out entirely.
+    pub apparmor: Option<bool>,
     pub uid_base: Option<u32>,
 }
 
@@ -142,6 +147,9 @@ pub struct Config {
     pub memory_max: Option<String>,
     pub cpu_quota: Option<String>,
     pub tasks_max: Option<String>,
+    /// Whether to apply the shipped AppArmor profile. `None` - the default -
+    /// means on-if-available (see `Layer::apparmor`).
+    pub apparmor: Option<bool>,
     pub uid_base: u32,
 }
 
@@ -165,6 +173,7 @@ impl Default for Config {
             memory_max: None,
             cpu_quota: None,
             tasks_max: None,
+            apparmor: None,
             uid_base: UID_BASE_DEFAULT,
         }
     }
@@ -193,6 +202,7 @@ impl Config {
         self.memory_max = layer.memory_max.or(self.memory_max.take());
         self.cpu_quota = layer.cpu_quota.or(self.cpu_quota.take());
         self.tasks_max = layer.tasks_max.or(self.tasks_max.take());
+        self.apparmor = layer.apparmor.or(self.apparmor.take());
         self.network = layer.network.unwrap_or(self.network);
         self.uid_base = layer.uid_base.unwrap_or(self.uid_base);
     }
@@ -451,6 +461,22 @@ mod tests {
         );
         assert_eq!(cfg.network, Network::None);
         assert_eq!(cfg.memory_max.as_deref(), Some("4G"));
+    }
+
+    #[test]
+    fn apparmor_defaults_to_unset_and_a_layer_can_set_it() {
+        // Default: unset, i.e. on-if-available with no nag.
+        let cfg = Config::default();
+        assert_eq!(cfg.apparmor, None);
+        // A later layer wins, in both directions.
+        let mut cfg = Config::default();
+        cfg.apply(layer("apparmor = true"));
+        assert_eq!(cfg.apparmor, Some(true));
+        cfg.apply(layer("apparmor = false"));
+        assert_eq!(cfg.apparmor, Some(false));
+        // A layer that says nothing leaves the earlier value in place.
+        cfg.apply(layer("network = 'none'"));
+        assert_eq!(cfg.apparmor, Some(false));
     }
 
     #[test]

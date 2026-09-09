@@ -104,7 +104,8 @@ src/sandbox.rs   one box: naming, paths, mounts, environment
 src/nspawn.rs    overlay mount, generated .nspawn settings, launching
 src/base.rs      building and refreshing the shared base image
 src/host.rs      the privilege boundary: sudo re-exec, caller identity
-contrib/         the original Python prototype, kept only for reference
+contrib/         the original Python prototype (reference) and an optional
+                 AppArmor profile (contrib/apparmor/)
 ```
 
 State on disk:
@@ -116,7 +117,7 @@ State on disk:
 /var/lib/agentbox/boxes/<box>/runtime/  who booted the box, and its live sessions
 /var/lib/machines/<box>                 the assembled rootfs (so machinectl sees it)
 /etc/systemd/nspawn/<box>.nspawn        generated settings: binds, UID map, network
-/etc/systemd/system/systemd-nspawn@<box>.service.d/  resource caps on the box's unit
+/etc/systemd/system/systemd-nspawn@<box>.service.d/  resource caps, and the AppArmor profile when loaded, on the box's unit
 ```
 
 ## Caveats
@@ -126,6 +127,11 @@ mistakes, and a reasonable one against hostile code, but it is a shared-kernel
 container, not a VM. If you are running something you actively expect to attack
 you, use a VM. See [docs/design.md](docs/design.md#security-model) for the
 specifics of what is and is not isolated.
+
+For a mandatory-access-control layer behind the user namespace, seccomp and
+mount plan, an optional AppArmor profile ships in
+[contrib/apparmor/](contrib/apparmor/); agentbox applies it automatically once it
+is loaded, and runs fine without it. It is per-distro (AppArmor, not SELinux).
 
 One limitation worth knowing before you point it at a project: directories
 under `/tmp`, `/run`, `/dev`, `/proc` and `/sys` cannot be mapped into a box,

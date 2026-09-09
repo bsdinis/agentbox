@@ -98,6 +98,11 @@ ro = []
 # memory_max = "8G"
 # cpu_quota  = "400%"
 
+# AppArmor confinement (defense in depth). Unset applies the shipped profile if
+# it is loaded on the host and does nothing otherwise; false opts out, true warns
+# when it is expected but missing. See contrib/apparmor/README.md.
+# apparmor = true
+
 # Variables set inside the box. Keep this table last: in TOML every key after a
 # table header belongs to that table, so a scalar moved below it silently
 # becomes an environment variable instead.
@@ -323,6 +328,7 @@ fn effective_toml(sb: &Sandbox) -> String {
         memory_max,
         cpu_quota,
         tasks_max,
+        apparmor,
         uid_base,
         ..
     } = &sb.cfg;
@@ -343,6 +349,10 @@ fn effective_toml(sb: &Sandbox) -> String {
         None => out.push_str("# address_families unset (no filtering)\n"),
     }
     out.push_str(&format!("uid_base = {uid_base}\n"));
+    match apparmor {
+        Some(v) => out.push_str(&format!("apparmor = {v}\n")),
+        None => out.push_str("# apparmor unset (applied if the profile is loaded)\n"),
+    }
     for (key, value) in [
         ("memory_max", memory_max),
         ("cpu_quota", cpu_quota),

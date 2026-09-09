@@ -63,6 +63,31 @@ and AF_UNIX — what systemd intends to default to — breaks `ip`, `ss`, `udev`
 glibc's resolver and, in `nat` mode, the container's own networkd, all of which
 need `AF_NETLINK`. Set `address_families` if you want the restriction anyway.
 
+## AppArmor: the profile is not confining the box, or a box will not launch
+
+The AppArmor profile is optional defense in depth (see
+[contrib/apparmor/README.md](../contrib/apparmor/README.md)). agentbox applies it
+only when it is actually loaded, so:
+
+* **`apparmor = true` warns it is "not loaded".** The profile has not been loaded
+  into the kernel, or AppArmor is off on this host. Load it (`apparmor_parser -r`)
+  or install AppArmor; the box still runs, just without the extra wall. Confirm
+  with `sudo grep agentbox-nspawn /sys/kernel/security/apparmor/profiles`.
+* **`agentbox --dry-run` shows no AppArmor even though it is loaded.** The loaded
+  -profile list is root-readable, and `--dry-run` does not escalate. Run
+  `sudo agentbox --dry-run shell` to see the real decision.
+* **A box fails to launch only after loading the profile.** This is the case to
+  watch for, and the reason to load in complain mode first. If `agentbox shell`
+  or `up` fails right after you enforced the profile, it is denying something the
+  box legitimately needs. Drop back to complain mode
+  (`sudo aa-complain agentbox-nspawn`), reproduce, and read `sudo aa-logprof` /
+  `dmesg | grep -i apparmor` to see what to allow. As a quick escape, set
+  `apparmor = false` to launch without it while you tune the profile.
+* **`systemd-run: Unit property AppArmorProfile is not applicable` (or similar).**
+  Your systemd rejects `AppArmorProfile=` on a transient scope. Booted boxes
+  (`agentbox up`) are unaffected; for `shell`/`run`, set `apparmor = false` and
+  file it — the booted path still gives you the profile.
+
 ## `cargo build` fails
 
 ```console
