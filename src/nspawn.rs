@@ -5,6 +5,7 @@ use std::ffi::OsStr;
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 
@@ -473,8 +474,14 @@ pub fn write_settings(sb: &Sandbox) -> Result<()> {
         return Ok(());
     }
     fs::create_dir_all(NSPAWN_DIR)?;
-    fs::write(sb.settings(), text)
-        .with_context(|| format!("cannot write {}", sb.settings().display()))
+    let path = sb.settings();
+    fs::write(&path, text).with_context(|| format!("cannot write {}", path.display()))?;
+    // The file carries `[env]`/`pass_env` values verbatim - an API key, say -
+    // and only root and systemd ever read it, so keep it out of other users'
+    // reach. Set the mode explicitly rather than trusting umask, which also
+    // tightens any world-readable file an older agentbox left behind.
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+        .with_context(|| format!("cannot secure {}", path.display()))
 }
 
 // --------------------------------------------------------------------------
