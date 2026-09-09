@@ -307,6 +307,9 @@ pub fn create(sb: &Sandbox) -> Result<bool> {
         fs::create_dir_all(sb.dir())?;
         write_meta(sb)?;
         seed_identity(sb)?;
+        // Before the mount points, since one of the binds is this agent's socket
+        // and `prepare_mount_point` stats every bind source.
+        spawn_ssh_agent(sb)?;
         for bind in sb.binds() {
             prepare_mount_point(sb, &bind)?;
         }
@@ -479,7 +482,11 @@ pub fn check_supported(sb: &Sandbox) -> Result<()> {
         // user chose; a configured rw/ro map whose source is the filesystem
         // root, the host home, or an ancestor of it would hand the box the whole
         // host and defeat the sandbox, so refuse it before anything is mounted.
-        if bind.src != sb.project {
+        // An `internal` bind (the box-scoped ssh-agent socket) has a source
+        // agentbox itself chose and controls - a single socket file under the
+        // box's state dir - so it is exempt from this check, which would
+        // otherwise refuse it for living under the state directory.
+        if bind.src != sb.project && !bind.internal {
             if let Some(reason) = overbroad_reason(&bind.src, &sb.user.home, state_dir()) {
                 bail!(
                     "refusing {} map of {}: its source is {}; a box must not be \
@@ -709,6 +716,197 @@ pub fn check_payload(sb: &Sandbox, program: &OsStr) -> Result<()> {
          docs/usage.md has the long version."
     ));
     bail!("{msg}")
+}
+
+// --------------------------------------------------------------------------
+// the box-scoped ssh-agent
+// --------------------------------------------------------------------------
+
+/// Caller variables the scoped agent needs so that `ssh-add -c`'s confirm-on-use
+/// prompt can reach a display when a key is later used. Forwarded from the
+/// invoking user's environment; whatever is unset is simply not passed.
+const AGENT_ASKPASS_ENV: [&str; 6] = [
+    "DISPLAY",
+    "WAYLAND_DISPLAY",
+    "XAUTHORITY",
+    "SSH_ASKPASS",
+    "SSH_ASKPASS_REQUIRE",
+    "DBUS_SESSION_BUS_ADDRESS",
+];
+
+/// Expand and validate the configured private-key paths. Fails closed: a
+/// missing key is an error, never a silent fallback to forwarding more.
+fn ssh_key_paths(sb: &Sandbox) -> Result<Vec<PathBuf>> {
+    let mut keys = Vec::with_capacity(sb.cfg.ssh_keys.len());
+    for spec in &sb.cfg.ssh_keys {
+        let path = crate::config::expand(spec);
+        if !path.exists() {
+            bail!(
+                "ssh key {} (from ssh_keys = [.. {:?} ..]) does not exist; \
+                 refusing to launch. agentbox never falls back to forwarding the \
+                 host's whole SSH agent.",
+                path.display(),
+                spec
+            );
+        }
+        keys.push(path);
+    }
+    Ok(keys)
+}
+
+/// A command that will run as the invoking user with a clean, minimal
+/// environment, so the scoped agent and `ssh-add` never inherit root's.
+fn as_user(sb: &Sandbox, program: &str) -> std::process::Command {
+    use std::os::unix::process::CommandExt;
+    let mut cmd = std::process::Command::new(program);
+    // Drop to the user: gid before uid, the order std applies them in. The
+    // child keeps root's supplementary groups (CommandExt::groups is unstable),
+    // which is harmless here - it runs as the user, reading only the user's own
+    // keys, which they already own.
+    cmd.gid(sb.user.gid).uid(sb.user.uid);
+    cmd.env_clear();
+    cmd.env("HOME", &sb.user.home);
+    cmd.env("USER", &sb.user.name);
+    cmd.env("LOGNAME", &sb.user.name);
+    cmd.env("PATH", NSPAWN_PATH);
+    for name in AGENT_ASKPASS_ENV {
+        if let Some(value) = env_var(name) {
+            cmd.env(name, value);
+        }
+    }
+    cmd
+}
+
+/// Is a process with this pid still around? Cheap and signal-free, matching how
+/// stale handovers are detected in `host.rs`.
+fn process_alive(pid: u32) -> bool {
+    Path::new("/proc").join(pid.to_string()).exists()
+}
+
+fn read_agent_pid(sb: &Sandbox) -> Option<u32> {
+    fs::read_to_string(sb.agent_pidfile())
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+}
+
+/// True when this box already has a live scoped agent listening on its socket,
+/// so `spawn_ssh_agent` can reuse it rather than restart it.
+fn agent_alive(sb: &Sandbox) -> bool {
+    sb.scoped_agent_sock().exists() && read_agent_pid(sb).is_some_and(process_alive)
+}
+
+/// `SSH_AGENT_PID=12345; export SSH_AGENT_PID;` -> 12345.
+fn parse_agent_pid(output: &str) -> Option<u32> {
+    output.split("SSH_AGENT_PID=").nth(1).and_then(|rest| {
+        let end = rest
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(rest.len());
+        rest[..end].parse().ok()
+    })
+}
+
+/// Start a dedicated ssh-agent for this box holding only the configured keys,
+/// and forward *its* socket into the box. The host's own `$SSH_AUTH_SOCK` is
+/// never used. Idempotent: a live agent is left running.
+///
+/// Runs as the invoking user, so the socket is owned by them and `owneridmap`
+/// maps it onto the sandbox user inside the box (exactly as the previous
+/// host-agent forwarding relied on), and so the keys never sit in root's memory.
+/// Each key is added with `ssh-add -c`, so every use of it prompts the user on
+/// the host to confirm. Fails closed at the first sign of trouble.
+pub fn spawn_ssh_agent(sb: &Sandbox) -> Result<()> {
+    if sb.cfg.ssh_keys.is_empty() {
+        return Ok(());
+    }
+    let keys = ssh_key_paths(sb)?; // validate before touching anything
+    if dry_run() {
+        info(&format!(
+            "would start a box-scoped ssh-agent at {} holding {} key(s), confirm-on-use",
+            sb.scoped_agent_sock().display(),
+            keys.len()
+        ));
+        return Ok(());
+    }
+    if agent_alive(sb) {
+        return Ok(());
+    }
+    // Clear any stale socket/pid from a crashed run before starting fresh.
+    teardown_ssh_agent(sb)?;
+
+    let dir = sb.agent_dir();
+    fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
+    std::os::unix::fs::chown(&dir, Some(sb.user.uid), Some(sb.user.gid))
+        .with_context(|| format!("cannot chown {}", dir.display()))?;
+    let mut perms = fs::metadata(&dir)?.permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o700);
+    fs::set_permissions(&dir, perms)?;
+
+    let sock = sb.scoped_agent_sock();
+    info(&format!(
+        "starting box-scoped ssh-agent for {} ({} key(s), confirm-on-use)",
+        sb.name,
+        keys.len()
+    ));
+    let out = as_user(sb, "ssh-agent")
+        .arg("-s")
+        .arg("-a")
+        .arg(&sock)
+        .output()
+        .context("cannot run ssh-agent")?;
+    if !out.status.success() {
+        let _ = fs::remove_file(&sock);
+        bail!(
+            "ssh-agent failed to start: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    let pid = parse_agent_pid(&String::from_utf8_lossy(&out.stdout)).context(
+        "could not read the pid of the box-scoped ssh-agent from its output",
+    )?;
+    fs::write(sb.agent_pidfile(), format!("{pid}\n"))
+        .with_context(|| format!("cannot write {}", sb.agent_pidfile().display()))?;
+
+    for key in &keys {
+        let ok = as_user(sb, "ssh-add")
+            .env("SSH_AUTH_SOCK", &sock)
+            .arg("-c")
+            .arg(key)
+            .status()
+            .with_context(|| format!("cannot run ssh-add for {}", key.display()))?
+            .success();
+        if !ok {
+            // Fail closed: never leave a half-loaded agent forwarded.
+            teardown_ssh_agent(sb)?;
+            bail!(
+                "ssh-add failed for {}; tore down the box-scoped ssh-agent \
+                 rather than forward an incomplete or wrong set of keys",
+                key.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Stop this box's scoped agent and remove its socket and pid file. Idempotent
+/// and best-effort: safe to call when no agent was ever started, and it never
+/// leaves the ssh-agent process running.
+pub fn teardown_ssh_agent(sb: &Sandbox) -> Result<()> {
+    if dry_run() {
+        return Ok(());
+    }
+    if let Some(pid) = read_agent_pid(sb) {
+        if process_alive(pid) {
+            // SAFETY: kill only signals the process; the pid was written by us
+            // for this box's agent. As root we may signal the user's process.
+            unsafe {
+                libc::kill(pid as libc::pid_t, libc::SIGTERM);
+            }
+        }
+    }
+    let _ = fs::remove_file(sb.scoped_agent_sock());
+    let _ = fs::remove_file(sb.agent_pidfile());
+    let _ = fs::remove_dir(sb.agent_dir());
+    Ok(())
 }
 
 // --------------------------------------------------------------------------
@@ -1094,6 +1292,25 @@ mod tests {
         assert_eq!(parse_systemd_version(""), None);
         assert_eq!(parse_systemd_version("systemd\n"), None);
         assert_eq!(parse_systemd_version("systemd v261\n"), None);
+    }
+
+    #[test]
+    fn the_scoped_agent_pid_is_read_from_ssh_agents_banner() {
+        assert_eq!(
+            parse_agent_pid("SSH_AGENT_PID=12345; export SSH_AGENT_PID;\n"),
+            Some(12345)
+        );
+        assert_eq!(
+            parse_agent_pid(
+                "SSH_AUTH_SOCK=/x/agent.sock; export SSH_AUTH_SOCK;\n\
+                 SSH_AGENT_PID=42; export SSH_AGENT_PID;\n\
+                 echo Agent pid 42;\n"
+            ),
+            Some(42)
+        );
+        // Nothing to parse -> None, so the caller fails closed.
+        assert_eq!(parse_agent_pid(""), None);
+        assert_eq!(parse_agent_pid("no pid here"), None);
     }
 
     #[test]

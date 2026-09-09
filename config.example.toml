@@ -25,6 +25,13 @@ rw = []
 # of the built-in TERM, COLORTERM and LANG.
 # pass_env = ["ANTHROPIC_API_KEY", "GITHUB_TOKEN"]
 
+# Private SSH keys every box on this host may use. agentbox starts a dedicated
+# ssh-agent per box holding ONLY these keys (added with confirm-on-use) and
+# forwards that agent's socket in; the host's own agent is never exposed. Most
+# hosts leave this empty and set ssh_keys per project instead, since keys are
+# usually project-specific. Empty - the default - means no agent, no forwarding.
+# ssh_keys = ["~/.ssh/id_ed25519"]
+
 # Resource caps applied to the container's systemd scope.
 # memory_max = "16G"
 # cpu_quota  = "800%"

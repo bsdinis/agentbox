@@ -213,6 +213,12 @@ impl Handle {
                 .silent()
                 .allow_fail()
                 .run();
+            // The box has actually powered off, so its box-scoped ssh-agent has
+            // no session left to serve: reap it here rather than per-attach, so a
+            // booted box that outlives one session keeps its agent alive and only
+            // the *last* session out kills it. Best-effort like the rest of
+            // release; a leaked agent is harmless and `down`/`rm` still reap it.
+            let _ = crate::nspawn::teardown_ssh_agent(sb);
             let _ = fs::remove_dir_all(runtime_dir(sb));
         }
     }
@@ -256,6 +262,9 @@ pub fn down(sb: &Sandbox) -> Result<()> {
     let _ = sh(argv!["systemctl", "stop", sb.service()])
         .allow_fail()
         .run();
+    // Powering the box off ends every session, so its scoped ssh-agent is done
+    // too; reap it here so `agentbox down` leaves nothing running on the host.
+    let _ = crate::nspawn::teardown_ssh_agent(sb);
     let _ = fs::remove_dir_all(runtime_dir(sb));
     Ok(())
 }

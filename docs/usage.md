@@ -100,7 +100,18 @@ Nothing that can authenticate to a remote is mapped in by default. Pick the
 level you are comfortable with:
 
 ```console
-$ agentbox shell --ssh-agent            # forward $SSH_AUTH_SOCK, no keys on disk
+$ agentbox shell --ssh-key ~/.ssh/id_ed25519   # box-scoped agent, this key only
+```
+
+This starts a **dedicated** ssh-agent for the box holding only the keys you
+name, and forwards that agent's socket in - never the host's own
+`$SSH_AUTH_SOCK`, which would expose every key it holds. Each key is added with
+`ssh-add -c`, so the box using it prompts you on the host to confirm. Set it
+persistently in the project file:
+
+```toml
+# .agentbox.toml - only these keys, via a box-scoped agent
+ssh_keys = ["~/.ssh/id_ed25519"]
 ```
 
 ```toml
@@ -109,7 +120,7 @@ pass_env = ["TERM", "GITHUB_TOKEN"]
 ```
 
 ```toml
-# or map keys read-only, if you accept that the agent can read them
+# or map keys read-only, if you accept that the box can read the key material
 ro = ["~/.ssh/id_ed25519", "~/.ssh/known_hosts"]
 ```
 

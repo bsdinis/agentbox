@@ -77,6 +77,13 @@ ro = []
 # extra environment variables forwarded from the host, if set
 # pass_env = ["ANTHROPIC_API_KEY"]
 
+# Specific SSH private keys this box may use. agentbox starts a dedicated
+# ssh-agent holding ONLY these keys and forwards that agent's socket into the
+# box; the host's own agent (and every other key it holds) is never exposed.
+# Each key is added with confirm-on-use, so the box using it prompts you on the
+# host. Empty - the default - means no agent and no forwarding.
+# ssh_keys = ["~/.ssh/id_ed25519"]
+
 # terminal background while a session runs. Unset leaves your terminal the
 # colour it already is; "auto" lets systemd-run pick its own per-box tint, and
 # an ANSI SGR background such as "48;5;52" picks your own.
@@ -310,7 +317,7 @@ fn effective_toml(sb: &Sandbox) -> String {
         packages,
         pass_env,
         env,
-        ssh_agent,
+        ssh_keys,
         background,
         address_families,
         memory_max,
@@ -327,7 +334,6 @@ fn effective_toml(sb: &Sandbox) -> String {
     out.push_str(&format!("name = {:?}\n", sb.name));
     out.push_str(&format!("network = {:?}\n", network.to_string()));
     out.push_str(&format!("shell = {:?}\n", sb.shell()));
-    out.push_str(&format!("ssh_agent = {ssh_agent}\n"));
     match background {
         Some(v) => out.push_str(&format!("background = {v:?}\n")),
         None => out.push_str("# background unset (terminal keeps its own colour)\n"),
@@ -351,6 +357,7 @@ fn effective_toml(sb: &Sandbox) -> String {
     out.push_str(&format!("ro = {}\n", list(ro)));
     out.push_str(&format!("packages = {}\n", list(packages)));
     out.push_str(&format!("pass_env = {}\n", list(pass_env)));
+    out.push_str(&format!("ssh_keys = {}\n", list(ssh_keys)));
     out.push_str("\n[env]\n");
     for (key, value) in env {
         out.push_str(&format!("{key} = {value:?}\n"));
@@ -368,6 +375,9 @@ pub fn reset(dir: &Option<PathBuf>, overrides: &Overrides, yes: bool) -> Result<
         return Ok(());
     }
     poweroff(&sb);
+    // Before rm -rf: the agent's pid file lives under sb.dir(), and removing it
+    // would strip our only handle on the running ssh-agent process.
+    nspawn::teardown_ssh_agent(&sb)?;
     nspawn::umount(&sb)?;
     sh(argv!["rm", "--one-file-system", "-rf", sb.dir()]).run()?;
     nspawn::create(&sb)?;
@@ -384,6 +394,8 @@ pub fn remove(dir: &Option<PathBuf>, overrides: &Overrides, yes: bool) -> Result
         return Ok(());
     }
     poweroff(&sb);
+    // Before rm -rf, for the same reason as reset: keep the handle on the agent.
+    nspawn::teardown_ssh_agent(&sb)?;
     nspawn::umount(&sb)?;
     sh(argv!["rm", "--one-file-system", "-rf", sb.dir()]).run()?;
     let _ = fs::remove_dir(sb.root());

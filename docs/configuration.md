@@ -26,7 +26,7 @@ left blank, and `agentbox config` prints what a project actually resolves to.
 | `packages` | list of strings | `[]` | pacman packages installed into the box the first time it is created. |
 | `env` | table | `{}` | Variables set inside the box, verbatim. |
 | `pass_env` | list of strings | `["TERM", "COLORTERM", "LANG"]` | Host variables forwarded **if set**. Use for `ANTHROPIC_API_KEY`, `GITHUB_TOKEN`. |
-| `ssh_agent` | bool | `false` | Bind `$SSH_AUTH_SOCK` to `~/.agentbox/ssh-agent.sock` and export it. |
+| `ssh_keys` | list of strings | `[]` | Private-key paths the box may use. agentbox starts a **dedicated** ssh-agent holding only these keys (added with `ssh-add -c`, so each use prompts you on the host to confirm) and binds *that* agent's socket to `~/.agentbox/ssh-agent.sock`, exporting `SSH_AUTH_SOCK`. The host's own `$SSH_AUTH_SOCK` is never forwarded. Empty (the default) means no agent and no forwarding. Fails closed: a missing key aborts the launch. |
 | `shell` | path | your host shell if present in the image, else `/bin/bash` | Login shell inside the box. |
 | `background` | string | unset | Terminal background while a session runs. Unset means no tint, so the terminal keeps its own colour. `"auto"` lets `systemd-run` pick its own per-box tint; an ANSI SGR background (`"40"`..`"47"`, `"48;5;N"`, `"48;2;R;G;B"`) picks a specific one. |
 | `address_families` | string | unset | Socket address families the box may use, as `RestrictAddressFamilies=`. Unset applies no filter and says so explicitly. Space-separated names (`"AF_INET AF_INET6 AF_UNIX AF_NETLINK"`), `~` to prohibit one, or `"none"`. Needs systemd 261; omitted below that. |
@@ -166,7 +166,7 @@ root, so they never prompt for a password.
 | `--map PATH[:DEST]` | `shell`, `run`, `up`, `status`, `config` | Extra read-only mount. Repeatable. |
 | `--rw-map PATH[:DEST]` | same | Extra read-write mount. Repeatable. |
 | `--network MODE` | same | Override network mode for this launch. |
-| `--ssh-agent` | same | Forward the SSH agent socket. |
+| `--ssh-key PATH` | same | Add a private key to the box's dedicated ssh-agent (confirm-on-use). Repeatable. The host's own agent is never forwarded. |
 | `--packages PKG` | `shell`, `run` | Extra packages on box creation. Repeatable. |
 | `--root` | `shell`, `run` | Run as container root instead of the sandbox user. |
 | `--dry-run` | all | Print the commands and the `.nspawn` file, change nothing. |
@@ -183,6 +183,7 @@ it in `.agentbox.toml`.
 | `/var/lib/agentbox/boxes/<box>/upper` | Every byte this box has written. |
 | `/var/lib/agentbox/boxes/<box>/work` | overlayfs scratch area. Do not touch. |
 | `/var/lib/agentbox/boxes/<box>/meta.json` | Project path, UID base, network mode. |
+| `/var/lib/agentbox/boxes/<box>/ssh-agent/` | Present only with `ssh_keys` set: the box-scoped ssh-agent's socket and pid, mode 0700, owned by you. Torn down by `down`, `reset` and `rm`. |
 | `/var/lib/machines/<box>` | Mount point of the assembled rootfs. |
 | `/etc/systemd/nspawn/<box>.nspawn` | Generated settings. Regenerated on every launch — edit the TOML, not this. |
 | `/etc/systemd/system/systemd-nspawn@<box>.service.d/` | Generated drop-in carrying the resource caps for booted mode. Removed by `agentbox rm`. |

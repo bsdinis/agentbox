@@ -105,7 +105,9 @@ pub struct Layer {
     pub packages: Option<Vec<String>>,
     pub pass_env: Option<Vec<String>>,
     pub env: Option<BTreeMap<String, String>>,
-    pub ssh_agent: Option<bool>,
+    /// Private-key paths a box-scoped ssh-agent should hold. Accumulates across
+    /// layers like the other lists. Empty means no agent, and no forwarding.
+    pub ssh_keys: Option<Vec<String>>,
     pub shell: Option<String>,
     pub background: Option<String>,
     pub address_families: Option<String>,
@@ -125,7 +127,10 @@ pub struct Config {
     pub packages: Vec<String>,
     pub pass_env: Vec<String>,
     pub env: BTreeMap<String, String>,
-    pub ssh_agent: bool,
+    /// Private keys the box's dedicated ssh-agent holds, before `expand()`.
+    /// Empty - the default - means no agent is started and nothing is
+    /// forwarded; the host's own `$SSH_AUTH_SOCK` is never bound in.
+    pub ssh_keys: Vec<String>,
     pub shell: Option<String>,
     /// Terminal background while the box runs. `None` - the default - means no
     /// tint at all, leaving the terminal the colour it already was.
@@ -153,7 +158,7 @@ impl Default for Config {
             packages: vec![],
             pass_env: ["TERM", "COLORTERM", "LANG"].map(String::from).to_vec(),
             env: BTreeMap::new(),
-            ssh_agent: false,
+            ssh_keys: vec![],
             shell: None,
             background: None,
             address_families: None,
@@ -178,6 +183,7 @@ impl Config {
         extend(&mut self.ro, layer.ro);
         extend(&mut self.packages, layer.packages);
         extend(&mut self.pass_env, layer.pass_env);
+        extend(&mut self.ssh_keys, layer.ssh_keys);
         self.env.extend(layer.env.unwrap_or_default());
         self.name = layer.name.or(self.name.take());
         self.hostname = layer.hostname.or(self.hostname.take());
@@ -188,7 +194,6 @@ impl Config {
         self.cpu_quota = layer.cpu_quota.or(self.cpu_quota.take());
         self.tasks_max = layer.tasks_max.or(self.tasks_max.take());
         self.network = layer.network.unwrap_or(self.network);
-        self.ssh_agent = layer.ssh_agent.unwrap_or(self.ssh_agent);
         self.uid_base = layer.uid_base.unwrap_or(self.uid_base);
     }
 }
@@ -200,7 +205,7 @@ pub struct Overrides {
     pub ro: Vec<String>,
     pub packages: Vec<String>,
     pub network: Option<Network>,
-    pub ssh_agent: bool,
+    pub ssh_keys: Vec<String>,
 }
 
 pub fn global_path() -> PathBuf {
@@ -233,6 +238,7 @@ fn global_layer() -> Result<Layer> {
     if let Some(toml::Value::Table(defaults)) = table.remove("defaults") {
         table.extend(defaults);
     }
+    reject_removed_keys(&table, &path.display().to_string())?;
     toml::Value::Table(table)
         .try_into()
         .with_context(|| format!("cannot understand {}", path.display()))
@@ -241,9 +247,28 @@ fn global_layer() -> Result<Layer> {
 fn project_layer(project: &Path) -> Result<Layer> {
     let path = project.join(PROJECT_FILE);
     let table = read_table(&path)?;
+    reject_removed_keys(&table, &path.display().to_string())?;
     toml::Value::Table(table)
         .try_into()
         .with_context(|| format!("cannot understand {}", path.display()))
+}
+
+/// `ssh_agent` was removed in favour of `ssh_keys`. Forwarding the host's whole
+/// agent exposed every key it held, so it is no longer a supported mode. Catch
+/// the old key with a migration message rather than letting `deny_unknown_fields`
+/// emit a bare "unknown field" and rather than silently ignoring it, which would
+/// leave a user believing an agent is being forwarded when none is.
+fn reject_removed_keys(table: &toml::Table, source: &str) -> Result<()> {
+    if table.contains_key("ssh_agent") {
+        bail!(
+            "{source} sets `ssh_agent`, which has been removed: forwarding the \
+             host's whole SSH agent exposed every key it held. List the specific \
+             private keys a box may use instead, e.g.\n  \
+             ssh_keys = [\"~/.ssh/id_ed25519\"]\n\
+             agentbox starts a dedicated agent holding only those keys."
+        );
+    }
+    Ok(())
 }
 
 pub fn load(project: &Path, overrides: &Overrides) -> Result<Config> {
@@ -255,7 +280,7 @@ pub fn load(project: &Path, overrides: &Overrides) -> Result<Config> {
         ro: Some(overrides.ro.clone()),
         packages: Some(overrides.packages.clone()),
         network: overrides.network,
-        ssh_agent: overrides.ssh_agent.then_some(true),
+        ssh_keys: Some(overrides.ssh_keys.clone()),
         ..Layer::default()
     });
     check_background(cfg.background.as_deref())?;
@@ -426,6 +451,35 @@ mod tests {
         );
         assert_eq!(cfg.network, Network::None);
         assert_eq!(cfg.memory_max.as_deref(), Some("4G"));
+    }
+
+    #[test]
+    fn ssh_keys_accumulate_and_dedup_across_layers() {
+        let mut cfg = Config::default();
+        // The default is no keys, hence no agent and no forwarding.
+        assert!(cfg.ssh_keys.is_empty());
+        cfg.apply(layer("ssh_keys = ['~/.ssh/id_ed25519_a']"));
+        cfg.apply(layer(
+            "ssh_keys = ['~/.ssh/id_ed25519_a', '~/.ssh/id_ed25519_b']",
+        ));
+        // Raw specs are preserved (expansion is deferred to spawn time), the
+        // list accumulates across layers, and a repeat is dropped.
+        assert_eq!(
+            cfg.ssh_keys,
+            ["~/.ssh/id_ed25519_a", "~/.ssh/id_ed25519_b"]
+        );
+    }
+
+    #[test]
+    fn the_removed_ssh_agent_key_is_rejected_with_a_migration_message() {
+        let table: toml::Table = "ssh_agent = true".parse().unwrap();
+        let err = reject_removed_keys(&table, "test.toml").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("ssh_agent"), "{msg}");
+        assert!(msg.contains("ssh_keys"), "{msg}");
+        // A table without it passes.
+        let ok: toml::Table = "ssh_keys = ['~/.ssh/id_ed25519']".parse().unwrap();
+        assert!(reject_removed_keys(&ok, "test.toml").is_ok());
     }
 
     #[test]

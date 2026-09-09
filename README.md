@@ -90,7 +90,7 @@ agentbox rm [-y]                     delete the box
 
 Every command except `build`, `ls` and `init` accepts `--dir PATH` to act on a
 project other than the current directory, plus `--map`, `--rw-map`,
-`--network`, `--ssh-agent` as one-off overrides. `--dry-run` prints the exact
+`--network`, `--ssh-key` as one-off overrides. `--dry-run` prints the exact
 commands and generated settings without changing anything.
 
 ## Layout

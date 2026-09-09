@@ -38,6 +38,10 @@ pub struct Bind {
     pub read_only: bool,
     pub src: PathBuf,
     pub dst: PathBuf,
+    /// An agentbox-generated bind whose source it controls (the box-scoped
+    /// ssh-agent socket), exempt from the overbroad-source check that guards
+    /// user-configured maps. Never set from configuration.
+    pub internal: bool,
 }
 
 impl Bind {
@@ -154,6 +158,7 @@ impl Sandbox {
             read_only: false,
             src: self.project.clone(),
             dst: self.project.clone(),
+            internal: false,
         }];
         let mut claimed = vec![self.project.clone()];
 
@@ -179,21 +184,42 @@ impl Sandbox {
                     read_only,
                     src,
                     dst,
+                    internal: false,
                 });
             }
         }
 
-        if self.cfg.ssh_agent {
-            match env_var("SSH_AUTH_SOCK").map(PathBuf::from) {
-                Some(sock) if sock.exists() => binds.push(Bind {
-                    read_only: false,
-                    src: sock,
-                    dst: self.ssh_agent_dst(),
-                }),
-                _ => crate::warn("ssh_agent requested but SSH_AUTH_SOCK is unset; skipping"),
-            }
+        // The only sanctioned forwarding path: the box's own dedicated agent,
+        // holding just the configured keys. Never the host's `$SSH_AUTH_SOCK`,
+        // which would expose every key it holds. The socket is created by
+        // `nspawn::spawn_ssh_agent` before the mount points are prepared; it is
+        // marked `internal` so `check_supported` does not refuse its source for
+        // living under the agentbox state directory.
+        if !self.cfg.ssh_keys.is_empty() {
+            binds.push(Bind {
+                read_only: false,
+                src: self.scoped_agent_sock(),
+                dst: self.ssh_agent_dst(),
+                internal: true,
+            });
         }
         binds
+    }
+
+    /// The box-scoped ssh-agent's private state: its socket and pid file. Kept
+    /// under the box's own state directory (mode 0700, owned by the invoking
+    /// user) rather than a world-readable place, since the socket grants use of
+    /// the configured keys.
+    pub fn agent_dir(&self) -> PathBuf {
+        self.dir().join("ssh-agent")
+    }
+
+    pub fn scoped_agent_sock(&self) -> PathBuf {
+        self.agent_dir().join("agent.sock")
+    }
+
+    pub fn agent_pidfile(&self) -> PathBuf {
+        self.agent_dir().join("agent.pid")
     }
 
     /// Where a forwarded agent socket appears inside the box.
@@ -215,7 +241,7 @@ impl Sandbox {
             }
         }
         env.extend(self.cfg.env.clone());
-        if self.cfg.ssh_agent {
+        if !self.cfg.ssh_keys.is_empty() {
             let sock = self.ssh_agent_dst();
             env.insert("SSH_AUTH_SOCK".into(), sock.display().to_string());
         }
@@ -302,6 +328,45 @@ fn sanitize(name: String) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sandbox_with(ssh_keys: Vec<String>) -> Sandbox {
+        // host() is needed for Sandbox::new (the invoking user) and for env().
+        let _ = crate::host::init(None, false);
+        let cfg = Config {
+            ssh_keys,
+            ..Config::default()
+        };
+        Sandbox::new(PathBuf::from("/home/me/project"), cfg)
+    }
+
+    #[test]
+    fn no_keys_forwards_no_socket_and_sets_no_auth_sock() {
+        let sb = sandbox_with(vec![]);
+        // The host's own agent is never bound in; with no keys there is no
+        // agent bind at all.
+        assert!(sb.binds().iter().all(|b| b.dst != sb.ssh_agent_dst()));
+        assert!(!sb.env().contains_key("SSH_AUTH_SOCK"));
+    }
+
+    #[test]
+    fn configured_keys_forward_only_the_scoped_agent_socket() {
+        let sb = sandbox_with(vec!["~/.ssh/id_ed25519_projectx".into()]);
+        let binds = sb.binds();
+        let agent: Vec<&Bind> = binds.iter().filter(|b| b.dst == sb.ssh_agent_dst()).collect();
+        assert_eq!(agent.len(), 1);
+        let agent = agent[0];
+        // The source is the box's own scoped socket, under the box state dir,
+        // not the host's $SSH_AUTH_SOCK.
+        assert_eq!(agent.src, sb.scoped_agent_sock());
+        assert!(agent.src.starts_with(sb.dir()));
+        // Marked internal so check_supported does not refuse a state-dir source.
+        assert!(agent.internal);
+        // And SSH_AUTH_SOCK inside the box points at the mount destination.
+        assert_eq!(
+            sb.env().get("SSH_AUTH_SOCK").map(String::as_str),
+            Some(sb.ssh_agent_dst().display().to_string().as_str())
+        );
+    }
 
     #[test]
     fn specs_split_on_the_first_unescaped_colon() {

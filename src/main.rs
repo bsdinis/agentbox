@@ -75,9 +75,10 @@ struct Target {
     #[arg(long)]
     network: Option<Network>,
 
-    /// Forward $SSH_AUTH_SOCK into the box
-    #[arg(long)]
-    ssh_agent: bool,
+    /// Private key the box's dedicated ssh-agent may use (confirm-on-use).
+    /// Repeatable. The host's own agent is never forwarded.
+    #[arg(long = "ssh-key", value_name = "PATH")]
+    ssh_key: Vec<String>,
 }
 
 impl Target {
@@ -87,7 +88,7 @@ impl Target {
             ro: self.map.clone(),
             packages: vec![],
             network: self.network,
-            ssh_agent: self.ssh_agent,
+            ssh_keys: self.ssh_key.clone(),
         }
     }
 }
