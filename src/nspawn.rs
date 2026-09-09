@@ -794,31 +794,50 @@ fn prepare_mount_point(sb: &Sandbox, bind: &Bind) -> Result<()> {
     .with_context(|| format!("cannot chown {}", target.display()))
 }
 
-/// In host-network mode the box shares the host's network namespace, so a
-/// booted box must never run networkd or resolved: it would reconfigure the
-/// host's own interfaces. Mask them per box rather than in the shared base,
-/// because nat mode needs networkd to bring up host0.
+/// Line up the box's networking units with its network mode.
+///
+/// * `host` shares the host's network namespace, so a booted box must never run
+///   networkd or resolved - they would reconfigure the host's own interfaces.
+///   Mask them.
+/// * `nat` gives the box its own veth, so it needs its *own* networkd to bring
+///   `host0` up and resolved to answer DNS. Arch enables neither by default, so
+///   enable them here (enabling the service pulls in its socket via `Also=`).
+/// * `none` has no interfaces; leave them off.
+///
+/// Done per box against the box's own rootfs (`systemctl --root` writes into the
+/// overlay's upper layer), so the shared base image is untouched and a mode
+/// change is re-applied on the next launch. `unmask` first clears whatever a
+/// previous mode left, so the decision below is authoritative.
 pub fn mask_host_network_units(sb: &Sandbox) -> Result<()> {
-    let dir = sb.inside(Path::new("/etc/systemd/system"));
-    fs::create_dir_all(&dir)?;
-    for unit in [
+    let root = sb.root();
+    let all = [
         "systemd-networkd.service",
         "systemd-networkd.socket",
         "systemd-resolved.service",
-    ] {
-        let link = dir.join(unit);
-        let masked = fs::read_link(&link)
-            .map(|t| t == Path::new("/dev/null"))
-            .unwrap_or(false);
-        match sb.cfg.network {
-            Network::Host if !masked => {
-                let _ = fs::remove_file(&link);
-                std::os::unix::fs::symlink("/dev/null", &link)?;
-            }
-            Network::Host => {}
-            _ if masked => fs::remove_file(&link)?,
-            _ => {}
+    ];
+    let mut unmask = argv!["systemctl", "--root", root.clone(), "unmask"];
+    unmask.extend(all.iter().map(crate::host::oss));
+    sh(unmask).quiet().silent().run()?;
+    match sb.cfg.network {
+        Network::Host => {
+            let mut mask = argv!["systemctl", "--root", root, "mask"];
+            mask.extend(all.iter().map(crate::host::oss));
+            sh(mask).quiet().silent().run()?;
         }
+        Network::Nat => {
+            sh(argv![
+                "systemctl",
+                "--root",
+                root,
+                "enable",
+                "systemd-networkd.service",
+                "systemd-resolved.service"
+            ])
+            .quiet()
+            .silent()
+            .run()?;
+        }
+        Network::None => {}
     }
     Ok(())
 }
@@ -1400,6 +1419,51 @@ pub fn canary(sb: &Sandbox, user: &str) -> Result<()> {
 
 /// Canary attempts before giving up - a couple of short retries to ride out the
 /// gap between the bus answering and logind being ready.
+/// Wait for a nat box's uplink, warning if it never comes.
+///
+/// A nat box gets its address over the veth from the host's DHCP server a couple
+/// of seconds *after* boot, so this waits for the default route - the network has
+/// to be usable before we install packages or run the payload, and returns as
+/// soon as it appears. If it never does, the host side of the veth was not
+/// configured - typically NetworkManager still owns `ve-*`/`vz-*`, so no DHCP
+/// answers and `host0` stays link-local. Point at the fix (docs/setup.md) rather
+/// than failing later with a baffling package-install error. A single in-box
+/// poll loop, so it costs one transient unit whatever the outcome.
+pub fn await_nat_network(sb: &Sandbox) -> Result<()> {
+    if dry_run() || sb.cfg.network != Network::Nat {
+        return Ok(());
+    }
+    let up = std::process::Command::new("systemd-run")
+        .args([
+            "--quiet",
+            "--pipe",
+            "--wait",
+            "-M",
+            &sb.name,
+            "--",
+            "sh",
+            "-c",
+            "for _ in $(seq 15); do \
+                 ip -4 route show default 2>/dev/null | grep -q default && exit 0; \
+                 sleep 1; \
+             done; exit 1",
+        ])
+        .stdin(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !up {
+        crate::warn(&format!(
+            "box {0} has network = nat but never got a default route: the host side \
+             of its veth was not configured, so the box has no network. On a \
+             NetworkManager host, tell NM to leave the container veths alone and \
+             enable systemd-networkd - see docs/setup.md, \"nat networking\". Or \
+             set network = \"host\".",
+            sb.name
+        ));
+    }
+    Ok(())
+}
 const CANARY_TRIES: u32 = 3;
 
 pub use crate::sandbox::state_dir;

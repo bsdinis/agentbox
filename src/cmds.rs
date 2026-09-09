@@ -304,6 +304,7 @@ pub fn shell(
     let handle = session::begin(&sb)?;
     let outcome = nspawn::wait_attachable(&sb)
         .and_then(|()| nspawn::canary(&sb, user))
+        .and_then(|()| nspawn::await_nat_network(&sb))
         .and_then(|()| nspawn::install_packages(&sb, fresh))
         .and_then(|()| match &program {
             Some(program) => nspawn::check_payload(&sb, program),
@@ -327,6 +328,7 @@ pub fn up(spec: &Option<String>, overrides: &Overrides) -> Result<()> {
     // first (riding out the logind lag with the canary), then install.
     nspawn::wait_attachable(&sb)?;
     nspawn::canary(&sb, &sb.user.name)?;
+    nspawn::await_nat_network(&sb)?;
     nspawn::install_packages(&sb, fresh)?;
     if !dry_run() {
         println!("booted {0}; open a shell with: agentbox shell {0}", sb.name);
