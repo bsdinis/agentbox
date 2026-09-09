@@ -232,9 +232,18 @@ SERVICE="systemd-nspawn@$LBOX.service"
 # for the container to answer on its own bus is what distinguishes a box that
 # booted from one that started and immediately exited.
 container_state() { sudo systemctl -M "$LBOX" is-system-running 2>/dev/null; }
+# `is-active` has transitional answers, so waiting for "not active" settles
+# nothing: it is satisfied by `activating` on the way up and by `deactivating`
+# on the way down. Wait for a state the unit can stay in.
+settled() {
+  case "$(systemctl is-active "$1" 2>/dev/null)" in
+    active | activating | deactivating | reloading) return 1 ;;
+    *) return 0 ;;
+  esac
+}
 for _ in $(seq 60); do
   case "$(container_state)" in running | degraded) break ;; esac
-  [[ "$(systemctl is-active "$SERVICE" 2>/dev/null)" == active ]] || break
+  settled "$SERVICE" && break   # it died; let the checks below report it
   sleep 0.5
 done
 check 'boots' "$(systemctl is-active "$SERVICE" 2>/dev/null)" active
@@ -244,8 +253,8 @@ check 'registers with machined'  "$(machinectl list --no-legend 2>/dev/null | aw
 check 'the settings file applied to the booted box' \
   "$(sudo systemd-run -M "$LBOX" --pipe --quiet --wait /usr/bin/hostname 2>/dev/null)" "$LBOX"
 "$AGENTBOX" down --dir "$LIMITS" >/dev/null 2>&1
-for _ in $(seq 30); do
-  [[ "$(systemctl is-active "$SERVICE" 2>/dev/null)" == active ]] || break
+for _ in $(seq 60); do
+  settled "$SERVICE" && break
   sleep 0.5
 done
 check 'powers off' "$(systemctl is-active "$SERVICE" 2>/dev/null)" inactive
