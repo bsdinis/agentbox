@@ -5,6 +5,7 @@ use std::ffi::OsStr;
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
+use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
@@ -711,8 +712,16 @@ pub fn check_payload(sb: &Sandbox, program: &OsStr) -> Result<()> {
 }
 
 // --------------------------------------------------------------------------
-// launching
+// bootstrap launch
 // --------------------------------------------------------------------------
+//
+// `run_in` runs a command in the box *before* it is ever booted: installing
+// the configured packages and setting the login shell while `create` is still
+// assembling the box. It launches nspawn directly, as PID 2 under a stub init,
+// which is right for a one-shot write into the overlay. Every launch a user
+// asks for goes the other way - it boots the box and attaches (see `attach`),
+// so resource caps live only on that booted unit's drop-in (`write_unit_caps`);
+// this bootstrap path is short-lived and uncapped.
 
 /// True only when stdin, stdout and stderr are all terminals.
 ///
@@ -720,9 +729,9 @@ pub fn check_payload(sb: &Sandbox, program: &OsStr) -> Result<()> {
 /// terminal", and either answer is wrong for a redirected launch. Invoked with
 /// a terminal it allocates a pseudo-TTY, so piped stdout arrives as CRLF with
 /// stderr merged into it, and EOF cannot propagate through a shell pipeline;
-/// invoked without one it defaults to `read-only`, which drops our stdin. Both
-/// make `agentbox run` unusable as a pipeline component, so anything short of
-/// fully interactive asks for the raw descriptors instead.
+/// invoked without one it defaults to `read-only`, which drops our stdin. The
+/// bootstrap installs run redirected, and an attach (which is where a pipeline
+/// actually matters) makes the same choice through `--pty`/`--pipe`.
 fn interactive_stdio() -> bool {
     // SAFETY: isatty only inspects the descriptor.
     (0..=2).all(|fd| unsafe { libc::isatty(fd) } == 1)
@@ -736,28 +745,7 @@ fn launch_argv(
 ) -> Vec<std::ffi::OsString> {
     // Settings files under /etc/systemd/nspawn are trusted, so `--settings=yes`
     // applies all of them while still letting these flags win.
-    // Resource caps have to sit on a unit, and nspawn allocates none of its own
-    // here: with --register=no the container simply inherits the caller's
-    // cgroup, so `--property=` had nowhere to land and every cap read back as
-    // the session default. Launch inside a transient scope of our own instead.
-    // Delegate=yes mirrors the stock systemd-nspawn@.service - nspawn creates
-    // its payload and supervisor subgroups below the scope.
     let mut args: Vec<std::ffi::OsString> = Vec::new();
-    let caps = caps(sb);
-    if !caps.is_empty() {
-        args.extend(argv![
-            "systemd-run",
-            "--scope",
-            "--quiet",
-            "--property=Delegate=yes"
-        ]);
-        for (key, value) in &caps {
-            args.push(crate::host::oss(format!("--property={key}={value}")));
-        }
-        // Not optional: systemd-run has its own -q and -M, and getopt would
-        // otherwise be free to read nspawn's flags as its own.
-        args.push(crate::host::oss("--"));
-    }
     args.extend(argv![
         "systemd-nspawn",
         "-q",
@@ -769,16 +757,12 @@ fn launch_argv(
         "--as-pid2",
         "--register=no"
     ]);
-    // nspawn tints the terminal background blue for as long as the container
-    // runs, which fights with whatever theme the host terminal already has. It
-    // has no .nspawn settings key, only this flag, and an empty value is its
-    // spelling for "do not tint" - the default here. A booted box never touches
-    // a terminal, so `up` needs none of this.
-    match sb.cfg.background.as_deref() {
-        Some(BACKGROUND_AUTO) => {} // leave nspawn to its own devices
-        Some(color) => args.push(crate::host::oss(format!("--background={color}"))),
-        None => args.push(crate::host::oss("--background=")),
-    }
+    // nspawn tints the terminal background for as long as it runs, which fights
+    // with whatever theme the host terminal already has. The configured tint
+    // belongs to the session a user watches (see `attach_argv`), not to this
+    // one-time bootstrap install, so suppress it here unconditionally - an empty
+    // value is nspawn's spelling for "do not tint".
+    args.push(crate::host::oss("--background="));
     if let Some(families) = address_families(sb) {
         args.push(crate::host::oss(format!(
             "--restrict-address-families={families}"
@@ -813,15 +797,186 @@ pub fn run_in(
     sh(launch_argv(sb, cmd, user, chdir)).quiet().run()
 }
 
-/// Replace this process with the box's payload, so it owns the terminal.
-pub fn exec_in(
+// --------------------------------------------------------------------------
+// attaching to a booted box
+// --------------------------------------------------------------------------
+//
+// A box that runs an agent is booted (systemd as PID 1, registered with
+// machined) rather than launched as the transient `--as-pid2` payload above,
+// so more than one session can attach to the same running box. Each attach is
+// a transient unit started inside the container's own systemd with
+// `systemd-run -M`, which - unlike `machinectl shell` - takes a working
+// directory, runs as a chosen user, and with `--wait` propagates the payload's
+// exit code back out. `--pty` for an interactive session, `--pipe` for a
+// redirected one, mirroring the terminal test the direct launch used.
+
+/// The `systemd-run` line that opens one session in the booted box.
+///
+/// The box's environment reaches the payload only if we pass it: nspawn's
+/// `Environment=` settings apply to the container's PID 1, and systemd does not
+/// hand its own environment to a transient unit, so `sb.env()` is forwarded
+/// with `--setenv`. Resource caps need no repeating here - they sit on the
+/// container's scope (see `write_unit_caps`) and cover every session in it.
+fn attach_argv(
     sb: &Sandbox,
     cmd: Vec<std::ffi::OsString>,
-    user: Option<&str>,
-    chdir: Option<&str>,
-) -> Result<std::convert::Infallible> {
-    sh(launch_argv(sb, cmd, user, chdir)).quiet().exec()
+    user: &str,
+    chdir: &str,
+) -> Vec<std::ffi::OsString> {
+    let mut args = argv![
+        "systemd-run",
+        "--quiet",
+        "--collect",
+        "--wait",
+        "-M",
+        sb.name.clone()
+    ];
+    let interactive = interactive_stdio();
+    args.push(crate::host::oss(if interactive {
+        "--pty"
+    } else {
+        "--pipe"
+    }));
+    args.extend(argv!["--uid", user]);
+    args.push(crate::host::oss(format!("--working-directory={chdir}")));
+    for (key, value) in sb.env() {
+        args.push(crate::host::oss(format!("--setenv={key}={value}")));
+    }
+    // The terminal tint follows the box for the life of the session, so it goes
+    // on the interactive attach - the one a person watches. `systemd-run` takes
+    // the same `--background` as nspawn: an SGR colour tints, an empty value
+    // suppresses, and leaving it off lets systemd-run pick its own per-machine
+    // default (what `background = "auto"` asks for). A redirected `--pipe`
+    // session has no terminal to colour, so it is left out there.
+    if interactive {
+        match sb.cfg.background.as_deref() {
+            Some(BACKGROUND_AUTO) => {}
+            Some(color) => args.push(crate::host::oss(format!("--background={color}"))),
+            None => args.push(crate::host::oss("--background=")),
+        }
+    }
+    args.push(crate::host::oss("--"));
+    args.extend(cmd);
+    args
 }
+
+/// Open a session and wait for it, returning the payload's exit code so the
+/// caller can exit with it. The child inherits our stdio, so its output - and
+/// any message systemd-run itself prints - reaches the terminal directly.
+pub fn attach(sb: &Sandbox, cmd: Vec<std::ffi::OsString>, user: &str, chdir: &str) -> Result<i32> {
+    let argv = attach_argv(sb, cmd, user, chdir);
+    if dry_run() {
+        println!("  {}", crate::host::render(&argv));
+        return Ok(0);
+    }
+    let status = std::process::Command::new(&argv[0])
+        .args(&argv[1..])
+        .status()
+        .with_context(|| format!("cannot run {:?}", argv[0]))?;
+    // A signalled payload has no code; report the conventional 128+signum so a
+    // ^C in the box still leaves agentbox with a non-zero, non-arbitrary exit.
+    Ok(status
+        .code()
+        .unwrap_or_else(|| 128 + status.signal().unwrap_or(0)))
+}
+
+/// How long to wait for a freshly booted box to become attachable.
+const ATTACH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+const ATTACH_POLL: std::time::Duration = std::time::Duration::from_millis(150);
+
+/// Wait until the box is far enough into boot to accept a session.
+///
+/// `systemctl start` returns when the container's PID 1 signalled readiness,
+/// which is *before* the container's D-Bus and logind - the pieces an attach
+/// needs - are guaranteed up. Poll the container's own systemd over the same
+/// channel an attach uses; a reply at all proves the bus is reachable, and the
+/// value tells us the boot stage. `degraded` counts as up: some unit failed
+/// (our masked networkd, say) but the box is fully attachable.
+pub fn wait_attachable(sb: &Sandbox) -> Result<()> {
+    if dry_run() {
+        return Ok(());
+    }
+    let deadline = std::time::Instant::now() + ATTACH_TIMEOUT;
+    loop {
+        let state = std::process::Command::new("systemctl")
+            .args(["-M", &sb.name, "is-system-running"])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default();
+        match state.as_str() {
+            "running" | "degraded" => return Ok(()),
+            "stopping" | "maintenance" => {
+                bail!("box {} is {state}, not attachable", sb.name)
+            }
+            // "", "initializing", "starting": the bus or boot is not ready yet.
+            _ => {}
+        }
+        if std::time::Instant::now() >= deadline {
+            bail!(
+                "box {0} booted but did not become attachable within {1}s \
+                 (last state: {2:?}); see `journalctl -M {0}`",
+                sb.name,
+                ATTACH_TIMEOUT.as_secs(),
+                state,
+            );
+        }
+        std::thread::sleep(ATTACH_POLL);
+    }
+}
+
+/// Prove the attach channel works before running the real payload.
+///
+/// `wait_attachable` shows the bus answers; this shows a unit can actually be
+/// started and a process spawned in the container - the exact path the payload
+/// takes. `/bin/true` has no side effects, so a failure is unambiguous (nothing
+/// of the caller's ran) and safe to retry through the residual logind lag.
+/// Reported as an agentbox error rather than mistaken for the payload failing.
+pub fn canary(sb: &Sandbox, user: &str) -> Result<()> {
+    if dry_run() {
+        return Ok(());
+    }
+    let argv = argv![
+        "systemd-run",
+        "--quiet",
+        "--collect",
+        "--wait",
+        "-M",
+        sb.name.clone(),
+        "--pipe",
+        "--uid",
+        user,
+        "--",
+        "/bin/true"
+    ];
+    let mut last = String::new();
+    for attempt in 0..CANARY_TRIES {
+        let out = std::process::Command::new(&argv[0])
+            .args(&argv[1..])
+            .stdin(std::process::Stdio::null())
+            .output()
+            .with_context(|| format!("cannot run {:?}", argv[0]))?;
+        if out.status.success() {
+            return Ok(());
+        }
+        last = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        if attempt + 1 < CANARY_TRIES {
+            std::thread::sleep(ATTACH_POLL);
+        }
+    }
+    bail!(
+        "couldn't open a session in {0}: {1}; see `journalctl -M {0}`",
+        sb.name,
+        if last.is_empty() {
+            "systemd-run failed".into()
+        } else {
+            last
+        },
+    )
+}
+
+/// Canary attempts before giving up - a couple of short retries to ride out the
+/// gap between the bus answering and logind being ready.
+const CANARY_TRIES: u32 = 3;
 
 pub use crate::sandbox::state_dir;
 

@@ -94,27 +94,33 @@ for tool state without seeing yours.
 single source of truth for binds, UID mapping, environment and network mode.
 Two consequences worth knowing:
 
-* `agentbox shell` runs `systemd-nspawn --settings=yes`, so the file applies in
-  full (files under `/etc/systemd/nspawn/` are trusted) while explicit command
-  line flags such as `-u root` still win.
-* `agentbox up` goes through the stock `systemd-nspawn@.service`, which forces
-  `-U --network-veth --settings=override`. Because `override` gives the file
-  precedence, our `PrivateUsers=` and `[Network]` settings take effect anyway,
-  and booted mode ends up identical to direct mode.
+* The bootstrap launch that assembles a box (installing packages, setting the
+  login shell) runs `systemd-nspawn --settings=yes`, so the file applies in full
+  (files under `/etc/systemd/nspawn/` are trusted) while explicit command line
+  flags such as `-u root` still win.
+* Every launch a user asks for — `shell`, `run`, `up` — boots the box through
+  the stock `systemd-nspawn@.service`, which forces `-U --network-veth
+  --settings=override`. Because `override` gives the file precedence, our
+  `PrivateUsers=` and `[Network]` settings take effect anyway, and the booted
+  box ends up identical to what the bootstrap launch saw.
 
-The flip side of one file serving both modes is that nothing describing a
-single *payload* may go in it. `User=` names the user to invoke the container's
-main process as, and for a booted box that process is systemd itself: setting
-it there gave PID 1 the sandbox user's UID, no way to create `/init.scope`, and
-a container that died a second after `agentbox up` reported success. `User=`
-and `WorkingDirectory=` are passed on the command line by the launches that
-want them, and the file carries only what is true of the box however it starts.
+The flip side of one file serving both the bootstrap launch and the booted
+service is that nothing describing a single *payload* may go in it. `User=`
+names the user to invoke the container's main process as, and for a booted box
+that process is systemd itself: setting it there gave PID 1 the sandbox user's
+UID, no way to create `/init.scope`, and a container that died a second after
+`agentbox up` reported success. The user and working directory are named on the
+command line instead — by the bootstrap launch, and by each `systemd-run`
+attach into the booted box — and the file carries only what is true of the box
+however it starts.
 
 Resource caps are the mirror image. They are properties of a *unit*, which the
-file cannot express at all: nspawn's `--property=` needs a unit to land on, and
-with `--register=no` a direct launch simply inherits the caller's cgroup. So
-direct launches run inside a transient `systemd-run --scope` carrying the caps,
-and booted boxes get a drop-in on their `systemd-nspawn@` instance.
+file cannot express at all. Every launch a user asks for boots the box's
+`systemd-nspawn@<box>.service` and attaches to it, so the caps go where they
+belong: a drop-in on that unit, covering the whole container and every session
+in it. (The only launch that is not a boot is the internal bootstrap that
+installs packages while the box is still being assembled; it is short-lived and
+runs uncapped.)
 
 The file is regenerated from the TOML on every launch, so editing it by hand is
 pointless.

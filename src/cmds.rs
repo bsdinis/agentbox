@@ -12,6 +12,7 @@ use crate::config::{self, Config, Overrides, PROJECT_FILE};
 use crate::host::{dry_run, host, oss, sh};
 use crate::nspawn;
 use crate::sandbox::Sandbox;
+use crate::session;
 
 /// Resolve the project directory a command applies to.
 pub fn project_dir(dir: &Option<PathBuf>) -> Result<PathBuf> {
@@ -76,9 +77,9 @@ ro = []
 # extra environment variables forwarded from the host, if set
 # pass_env = ["ANTHROPIC_API_KEY"]
 
-# terminal background while the box runs. Unset leaves your terminal the colour
-# it already is; "auto" restores systemd-nspawn's blue tint, and an ANSI SGR
-# background such as "48;5;52" picks your own.
+# terminal background while a session runs. Unset leaves your terminal the
+# colour it already is; "auto" lets systemd-run pick its own per-box tint, and
+# an ANSI SGR background such as "48;5;52" picks your own.
 # background = "auto"
 
 # socket address families the box may use. Unset means no filtering at all,
@@ -123,6 +124,10 @@ fn warn_if_unmappable(project: &Path) {
     }
 }
 
+/// Boot the box if it is not already running, then open a session in it: an
+/// interactive shell, or the given command. The box outlives the session (so
+/// another `shell`/`run` can attach to the same running box), and powers off
+/// with the last session unless `up` marked it kept - see `session`.
 pub fn shell(
     dir: &Option<PathBuf>,
     overrides: &Overrides,
@@ -141,45 +146,42 @@ pub fn shell(
     if let Some(program) = argv.first() {
         nspawn::check_payload(&sb, program)?;
     }
-    // Named explicitly rather than left to the settings file, which applies to
-    // booted launches too (see nspawn::settings_text).
     let user = if as_root { "root" } else { &sb.user.name };
     let chdir = sb.project.to_string_lossy().into_owned();
-    nspawn::exec_in(&sb, argv, Some(user), Some(&chdir))?;
-    unreachable!()
+
+    // Boot-and-register, then prove the box is attachable before running the
+    // payload exactly once. release() runs whatever the outcome, so a failure
+    // between here and the attach does not leak a session or a box booted only
+    // to carry it.
+    let handle = session::begin(&sb)?;
+    let outcome = nspawn::wait_attachable(&sb)
+        .and_then(|()| nspawn::canary(&sb, user))
+        .and_then(|()| nspawn::attach(&sb, argv, user, &chdir));
+    handle.release(&sb);
+    // Exit with the payload's own code, as replacing the process used to.
+    match outcome {
+        Ok(code) => std::process::exit(code),
+        Err(err) => Err(err),
+    }
 }
 
 pub fn up(dir: &Option<PathBuf>, overrides: &Overrides) -> Result<()> {
     let sb = load(dir, overrides)?;
     nspawn::create(&sb)?;
-    sh(argv!["systemctl", "start", sb.service()]).run()?;
-    println!(
-        "booted {}; enter it with: agentbox enter --dir {}",
-        sb.name,
-        sb.project.display()
-    );
+    session::ensure_up(&sb)?;
+    if !dry_run() {
+        println!(
+            "booted {}; open a shell with: agentbox shell --dir {}",
+            sb.name,
+            sb.project.display()
+        );
+    }
     Ok(())
-}
-
-pub fn enter(dir: &Option<PathBuf>, overrides: &Overrides) -> Result<()> {
-    let sb = load(dir, overrides)?;
-    sh(argv![
-        "machinectl",
-        "shell",
-        format!("{}@{}", sb.user.name, sb.name),
-        sb.shell()
-    ])
-    .quiet()
-    .exec()?;
-    unreachable!()
 }
 
 pub fn down(dir: &Option<PathBuf>, overrides: &Overrides) -> Result<()> {
     let sb = load(dir, overrides)?;
-    sh(argv!["machinectl", "poweroff", sb.name.clone()])
-        .allow_fail()
-        .run()?;
-    Ok(())
+    session::down(&sb)
 }
 
 pub fn list() -> Result<()> {
@@ -393,8 +395,11 @@ pub fn remove(dir: &Option<PathBuf>, overrides: &Overrides, yes: bool) -> Result
     Ok(())
 }
 
+/// Stop the box and wait for it, so the overlay is idle before `umount`.
+/// `systemctl stop` blocks until the unit is gone; `machinectl poweroff` would
+/// return while the container was still shutting down and leave the mount busy.
 fn poweroff(sb: &Sandbox) {
-    let _ = sh(argv!["machinectl", "poweroff", sb.name.clone()])
+    let _ = sh(argv!["systemctl", "stop", sb.service()])
         .quiet()
         .silent()
         .allow_fail()

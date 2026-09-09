@@ -198,37 +198,46 @@ tasks_max  = "4096"
 ```
 
 A runaway `make -j$(nproc)` or a memory-leaking test then hits a wall instead
-of your host. They apply to every way a box can be launched: `run` and `shell`
-put the container in a transient scope carrying the caps, and `up` gets them
-from a drop-in on its unit.
+of your host. Every launch boots the box's `systemd-nspawn@<box>.service`, and
+the caps sit on a drop-in on that unit, so they apply the same to `run`,
+`shell` and `up` alike, covering every session attached to the box at once.
 
 To see them in force, look from the host rather than from inside — the box's
 own `/sys/fs/cgroup` is a subgroup below the capped one, so it reads `max`:
 
 ```console
-$ agentbox run -- sleep 60 &
-$ systemd-cgls                     # find the run-*.scope the box sits in
-$ systemctl show -p MemoryMax -p CPUQuotaPerSecUSec -p TasksMax run-<id>.scope
+$ agentbox up
+$ systemctl show -p MemoryMax -p CPUQuotaPerSecUSec -p TasksMax \
+    systemd-nspawn@<box>.service
 ```
 
-## Booted mode
+## One box, several sessions
 
-`agentbox shell` runs your command as PID 2 under a tiny init — fast, and right
-for almost everything. When you want systemd inside the box (timers, socket
-activation, a database service, several terminals into one box):
+A box is a booted machine: `shell` or `run` boots it (systemd as PID 1 inside,
+registered with machined) the first time, and every later `shell`/`run` on the
+same project attaches another session to the *same* running box. So a second
+terminal can join a box an agent is already working in:
 
 ```console
-$ agentbox up                  # boots it, backgrounded
-$ agentbox enter               # machinectl shell into it
-$ machinectl list              # it shows up as a machine
+$ agentbox run -- claude       # boots the box, runs the agent in it
+$ agentbox shell               # from another terminal: a shell in the same box
+$ machinectl list              # the box shows up as a machine
 $ journalctl -M <box>          # its journal
-$ agentbox down                # poweroff
 ```
 
-Both modes read the same generated `/etc/systemd/nspawn/<box>.nspawn`, so the
-mounts, UID map and network mode are identical either way. Who you are is not
-in that file: a booted box starts systemd as container root, as PID 1 must be,
-and `agentbox enter` logs you in as yourself afterwards.
+Who first started the box decides when it stops. A box booted by `shell`/`run`
+exists to carry sessions, so it powers off when the last session leaves —
+whichever session that turns out to be, not necessarily the first. A box booted
+by `agentbox up` is kept: it stays running until `agentbox down`, however many
+sessions come and go (and `up` on a box a `shell` already started promotes it to
+kept). Use `up` when you want systemd services — timers, socket activation, a
+database — running in the box with no session attached.
+
+Every session reads the same generated `/etc/systemd/nspawn/<box>.nspawn`, so
+the mounts, UID map and network mode are identical throughout. Who you are is
+not in that file: a box starts systemd as container root, as PID 1 must be, and
+each `shell`/`run` attaches as you (or as root with `--root`) afterwards, in the
+project directory.
 
 ## Running agents inside
 

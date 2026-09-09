@@ -19,6 +19,7 @@ mod config;
 mod host;
 mod nspawn;
 mod sandbox;
+mod session;
 
 use std::path::PathBuf;
 
@@ -111,20 +112,14 @@ enum Command {
         target: Target,
     },
 
-    /// Create the box if needed, then enter it
+    /// Create or attach to the box, then open a shell in it
     Shell(RunArgs),
 
-    /// Run one command inside the box
+    /// Create or attach to the box, then run one command in it
     Run(RunArgs),
 
-    /// Boot the box with systemd as PID 1 inside
+    /// Boot the box and keep it running until `down`
     Up {
-        #[command(flatten)]
-        target: Target,
-    },
-
-    /// Shell into a booted box
-    Enter {
         #[command(flatten)]
         target: Target,
     },
@@ -220,7 +215,6 @@ fn run() -> Result<()> {
             cmds::shell(&args.target.dir, &args.overrides(), args.root, &args.cmd)
         }
         Command::Up { target } => cmds::up(&target.dir, &target.overrides()),
-        Command::Enter { target } => cmds::enter(&target.dir, &target.overrides()),
         Command::Down { target } => cmds::down(&target.dir, &target.overrides()),
         Command::Ls => cmds::list(),
         Command::Status { target } => cmds::status(&target.dir, &target.overrides()),

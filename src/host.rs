@@ -221,6 +221,23 @@ pub fn oss(v: impl AsRef<OsStr>) -> OsString {
     v.as_ref().to_os_string()
 }
 
+/// Render an argv as a shell-pasteable line, quoting only what needs it. Shared
+/// by `Sh`'s own logging and by callers that spawn a command directly and still
+/// want `--dry-run` to print the same thing.
+pub fn render(argv: &[OsString]) -> String {
+    argv.iter()
+        .map(|a| {
+            let s = a.to_string_lossy();
+            if s.contains(|c: char| c.is_whitespace() || c == '\'') {
+                format!("'{}'", s.replace('\'', r"'\''"))
+            } else {
+                s.into_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Build an argv. Accepts anything `AsRef<OsStr>`: &str, String, &Path, PathBuf.
 #[macro_export]
 macro_rules! argv {
@@ -264,18 +281,7 @@ impl Sh {
     }
 
     fn rendered(&self) -> String {
-        self.argv
-            .iter()
-            .map(|a| {
-                let s = a.to_string_lossy();
-                if s.contains(|c: char| c.is_whitespace() || c == '\'') {
-                    format!("'{}'", s.replace('\'', r"'\''"))
-                } else {
-                    s.into_owned()
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(" ")
+        render(&self.argv)
     }
 
     fn build(&self) -> Command {
@@ -317,15 +323,5 @@ impl Sh {
             .ok()
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
             .unwrap_or_default()
-    }
-
-    /// Replace this process, so the child owns the terminal and signals.
-    pub fn exec(self) -> Result<std::convert::Infallible> {
-        if dry_run() {
-            println!("  {}", self.rendered());
-            std::process::exit(0);
-        }
-        let err = self.build().exec();
-        Err(err).with_context(|| format!("cannot exec {:?}", self.argv[0]))
     }
 }

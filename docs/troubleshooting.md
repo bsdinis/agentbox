@@ -247,27 +247,28 @@ agentbox no longer writes one and regenerates the file on every launch, so one
 more `agentbox up` clears a stale file left by an older version. See
 [design.md](design.md#why-one-generated-nspawn-file).
 
-## `machinectl shell` says the machine is unknown
+## A box will not power off
 
-`agentbox shell` runs with `--register=no`, so direct-mode boxes deliberately
-do not appear in `machinectl list`. Use `agentbox up` if you want a registered,
-booted machine.
+`shell`/`run` power the box off when the last session leaves, but only a box
+they started, and only if no session is still attached. A box `agentbox up`
+started is kept on purpose — stop it with `agentbox down`. If a launch was
+killed hard (SIGKILL) its session file lingers in
+`/var/lib/agentbox/boxes/<box>/runtime/sessions/`; the next `shell`/`run`/`down`
+sweeps entries whose process is gone, so one more launch (or a `down`) clears a
+box wedged that way.
 
 ## `memory.max` inside the box says `max`
 
 Look from the host instead. nspawn delegates a subgroup to the container and
 the caps sit on the unit above it, so the box's own view of `/sys/fs/cgroup`
-correctly reports no limit of its own:
+correctly reports no limit of its own. Every launch boots the box's unit, so the
+caps always live there:
 
 ```console
-$ agentbox run -- sleep 60 &
-$ systemd-cgls                     # find the run-*.scope holding the box
-$ systemctl show -p MemoryMax -p CPUQuotaPerSecUSec -p TasksMax run-<id>.scope
+$ agentbox up
+$ systemctl show -p MemoryMax -p CPUQuotaPerSecUSec -p TasksMax \
+    systemd-nspawn@<box>.service
 ```
-
-A booted box gets its caps from
-`/etc/systemd/system/systemd-nspawn@<box>.service.d/` instead; check that with
-`systemctl show -p MemoryMax systemd-nspawn@<box>.service`.
 
 ## A program behaves differently when agentbox's output is redirected
 

@@ -78,9 +78,9 @@ why it is opt-in; the real base image is never touched.
 ```
 agentbox build [--refresh|--force]   build or update the shared base image
 agentbox init [--force]              write .agentbox.toml for this project
-agentbox shell [-- CMD ...]          create the box if needed, then enter it
-agentbox run -- CMD ...               run one command inside the box
-agentbox up | enter | down           booted mode: systemd as PID 1 inside
+agentbox shell [-- CMD ...]          boot or attach to the box, open a shell
+agentbox run -- CMD ...               boot or attach to the box, run one command
+agentbox up | down                   boot a box and keep it up | power it off
 agentbox ls                          list boxes, overlay state, bytes written
 agentbox status                      show the box and mount plan for this project
 agentbox config                      show the effective config and .nspawn file
@@ -91,7 +91,7 @@ agentbox rm [-y]                     delete the box
 Every command except `build`, `ls` and `init` accepts `--dir PATH` to act on a
 project other than the current directory, plus `--map`, `--rw-map`,
 `--network`, `--ssh-agent` as one-off overrides. `--dry-run` prints the exact
-`systemd-nspawn` invocation and generated settings without changing anything.
+commands and generated settings without changing anything.
 
 ## Layout
 
@@ -113,9 +113,10 @@ State on disk:
 /var/lib/agentbox/base                 shared read-only Arch rootfs (the lower layer)
 /var/lib/agentbox/boxes/<box>/upper     everything this box has written
 /var/lib/agentbox/boxes/<box>/meta.json project path, UID range, network mode
+/var/lib/agentbox/boxes/<box>/runtime/  who booted the box, and its live sessions
 /var/lib/machines/<box>                 the assembled rootfs (so machinectl sees it)
 /etc/systemd/nspawn/<box>.nspawn        generated settings: binds, UID map, network
-/etc/systemd/system/systemd-nspawn@<box>.service.d/  resource caps for booted mode
+/etc/systemd/system/systemd-nspawn@<box>.service.d/  resource caps on the box's unit
 ```
 
 ## Caveats
