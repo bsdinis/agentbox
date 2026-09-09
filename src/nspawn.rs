@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 
 use crate::argv;
-use crate::config::{Network, PROJECT_FILE, UID_RANGE};
+use crate::config::{Network, BACKGROUND_AUTO, PROJECT_FILE, UID_RANGE};
 use crate::host::{dry_run, env_var, host, sh};
 use crate::sandbox::{Bind, Sandbox, NSPAWN_DIR, UNIT_DIR};
 use crate::{base, info};
@@ -592,6 +592,16 @@ fn launch_argv(
         "--as-pid2",
         "--register=no"
     ]);
+    // nspawn tints the terminal background blue for as long as the container
+    // runs, which fights with whatever theme the host terminal already has. It
+    // has no .nspawn settings key, only this flag, and an empty value is its
+    // spelling for "do not tint" - the default here. A booted box never touches
+    // a terminal, so `up` needs none of this.
+    match sb.cfg.background.as_deref() {
+        Some(BACKGROUND_AUTO) => {} // leave nspawn to its own devices
+        Some(color) => args.push(crate::host::oss(format!("--background={color}"))),
+        None => args.push(crate::host::oss("--background=")),
+    }
     // The man page's caution about handing file descriptors to the payload is
     // the reason this is conditional: pipe mode is chosen precisely when they
     // are not terminals. A terminal stdin can still be passed through when

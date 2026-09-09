@@ -13,6 +13,9 @@ use serde::Deserialize;
 use crate::host::{env_var, host};
 
 pub const PROJECT_FILE: &str = ".agentbox.toml";
+/// `background = "auto"`: leave systemd-nspawn to tint the terminal as it
+/// likes, rather than naming a colour or turning it off.
+pub const BACKGROUND_AUTO: &str = "auto";
 pub const UID_RANGE: u32 = 65536;
 /// Multiple of 65536, inside the range systemd reserves for containers.
 pub const UID_BASE_DEFAULT: u32 = 1_310_720_000;
@@ -104,6 +107,7 @@ pub struct Layer {
     pub env: Option<BTreeMap<String, String>>,
     pub ssh_agent: Option<bool>,
     pub shell: Option<String>,
+    pub background: Option<String>,
     pub memory_max: Option<String>,
     pub cpu_quota: Option<String>,
     pub tasks_max: Option<String>,
@@ -122,6 +126,9 @@ pub struct Config {
     pub env: BTreeMap<String, String>,
     pub ssh_agent: bool,
     pub shell: Option<String>,
+    /// Terminal background while the box runs. `None` - the default - means no
+    /// tint at all, leaving the terminal the colour it already was.
+    pub background: Option<String>,
     pub memory_max: Option<String>,
     pub cpu_quota: Option<String>,
     pub tasks_max: Option<String>,
@@ -143,6 +150,7 @@ impl Default for Config {
             env: BTreeMap::new(),
             ssh_agent: false,
             shell: None,
+            background: None,
             memory_max: None,
             cpu_quota: None,
             tasks_max: None,
@@ -168,6 +176,7 @@ impl Config {
         self.name = layer.name.or(self.name.take());
         self.hostname = layer.hostname.or(self.hostname.take());
         self.shell = layer.shell.or(self.shell.take());
+        self.background = layer.background.or(self.background.take());
         self.memory_max = layer.memory_max.or(self.memory_max.take());
         self.cpu_quota = layer.cpu_quota.or(self.cpu_quota.take());
         self.tasks_max = layer.tasks_max.or(self.tasks_max.take());
@@ -242,7 +251,25 @@ pub fn load(project: &Path, overrides: &Overrides) -> Result<Config> {
         ssh_agent: overrides.ssh_agent.then_some(true),
         ..Layer::default()
     });
+    check_background(cfg.background.as_deref())?;
     Ok(cfg)
+}
+
+/// systemd-nspawn rejects a malformed `--background=` itself, but only once a
+/// launch is already under way, with the overlay mounted and the box created.
+/// The grammar is narrow enough to check here, where a bad value costs nothing.
+fn check_background(value: Option<&str>) -> Result<()> {
+    let Some(value) = value.filter(|v| *v != BACKGROUND_AUTO) else {
+        return Ok(());
+    };
+    if !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit() || b == b';') {
+        return Ok(());
+    }
+    bail!(
+        "background must be {BACKGROUND_AUTO:?} or an ANSI SGR background colour \
+         - \"40\" to \"47\", \"48;5;N\" or \"48;2;R;G;B\" (got {value:?}). \
+         Remove the key to leave the terminal its own colour."
+    )
 }
 
 /// Packages for the shared base image: `base_packages` at the top level, or
@@ -382,6 +409,23 @@ mod tests {
         assert_eq!(cfg.env.get("A").unwrap(), "1");
         assert_eq!(cfg.env.get("B").unwrap(), "override");
         assert_eq!(cfg.env.get("C").unwrap(), "3");
+    }
+
+    #[test]
+    fn a_background_colour_is_an_sgr_sequence_or_auto() {
+        for good in [
+            None,
+            Some("auto"),
+            Some("40"),
+            Some("48;5;52"),
+            Some("48;2;0;0;80"),
+        ] {
+            assert!(check_background(good).is_ok(), "{good:?}");
+        }
+        // The shapes a person actually types by mistake.
+        for bad in [Some(""), Some("blue"), Some("#000080"), Some("48,5,52")] {
+            assert!(check_background(bad).is_err(), "{bad:?}");
+        }
     }
 
     #[test]

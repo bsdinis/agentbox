@@ -51,6 +51,8 @@ Include = /etc/pacman.d/mirrorlist
 
 /// Run a command inside the half-built image.
 fn in_image(cmd: Vec<OsString>, uid_base: Option<u32>, host_cache: bool) -> Result<()> {
+    // --background= for the same reason as the box launches: a build is long
+    // and interactive, and there is no config to consult this early.
     let mut args = argv![
         "systemd-nspawn",
         "-q",
@@ -59,7 +61,8 @@ fn in_image(cmd: Vec<OsString>, uid_base: Option<u32>, host_cache: bool) -> Resu
         "--as-pid2",
         "--register=no",
         "--resolv-conf=copy-host",
-        "--timezone=off"
+        "--timezone=off",
+        "--background="
     ];
     if host_cache {
         // Share the host's package cache: a fresh build downloads almost
@@ -140,6 +143,7 @@ pub fn build(refresh: bool, force: bool) -> Result<()> {
         "--register=no",
         format!("--private-users={uid_base}:{UID_RANGE}"),
         "--private-users-ownership=chown",
+        "--background=",
         "--",
         "/bin/true"
     ])

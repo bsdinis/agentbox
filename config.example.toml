@@ -34,6 +34,11 @@ rw = []
 # has it, otherwise /bin/bash.
 # shell = "/usr/bin/fish"
 
+# Terminal background while a box runs. Unset - the default - leaves the
+# terminal whatever colour it already was. "auto" restores systemd-nspawn's own
+# blue tint; an ANSI SGR background such as "48;5;52" picks your own.
+# background = "auto"
+
 # UID range the container's 0..65535 is mapped onto. Must be a multiple of
 # 65536. Change this only before building the base image.
 # uid_base = 1310720000

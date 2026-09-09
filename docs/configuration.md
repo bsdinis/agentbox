@@ -28,6 +28,7 @@ left blank, and `agentbox config` prints what a project actually resolves to.
 | `pass_env` | list of strings | `["TERM", "COLORTERM", "LANG"]` | Host variables forwarded **if set**. Use for `ANTHROPIC_API_KEY`, `GITHUB_TOKEN`. |
 | `ssh_agent` | bool | `false` | Bind `$SSH_AUTH_SOCK` to `~/.agentbox/ssh-agent.sock` and export it. |
 | `shell` | path | your host shell if present in the image, else `/bin/bash` | Login shell inside the box. |
+| `background` | string | unset | Terminal background while the box runs. Unset means no tint, so the terminal keeps its own colour. `"auto"` restores systemd-nspawn's blue tint; an ANSI SGR background (`"40"`..`"47"`, `"48;5;N"`, `"48;2;R;G;B"`) picks a specific one. |
 | `memory_max` | string | unset | `MemoryMax=` on the container scope, e.g. `"16G"`. |
 | `cpu_quota` | string | unset | `CPUQuota=`, e.g. `"400%"`. |
 | `tasks_max` | string | unset | `TasksMax=`. |
@@ -38,6 +39,11 @@ applied in the two places a box can be launched from: `run` and `shell` start
 the container inside a transient scope of their own carrying the caps, and
 `up` gets a drop-in on its `systemd-nspawn@` instance. `agentbox rm` removes
 the drop-in.
+
+`background` is a `systemd-nspawn` command-line flag with no `.nspawn` settings
+key, so it is passed by `run` and `shell` only. `up` needs none: a booted box is
+a service with no terminal to tint. The same "no tint" default is hardcoded into
+the `agentbox build` launches, which have no project config to read.
 
 Global-config-only:
 

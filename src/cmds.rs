@@ -76,12 +76,20 @@ ro = []
 # extra environment variables forwarded from the host, if set
 # pass_env = ["ANTHROPIC_API_KEY"]
 
-[env]
-# RUST_BACKTRACE = "1"
+# terminal background while the box runs. Unset leaves your terminal the colour
+# it already is; "auto" restores systemd-nspawn's blue tint, and an ANSI SGR
+# background such as "48;5;52" picks your own.
+# background = "auto"
 
 # resource caps enforced by systemd on the container scope
 # memory_max = "8G"
 # cpu_quota  = "400%"
+
+# Variables set inside the box. Keep this table last: in TOML every key after a
+# table header belongs to that table, so a scalar moved below it silently
+# becomes an environment variable instead.
+[env]
+# RUST_BACKTRACE = "1"
 "#
     );
     if dry_run() {
@@ -296,6 +304,7 @@ fn effective_toml(sb: &Sandbox) -> String {
         pass_env,
         env,
         ssh_agent,
+        background,
         memory_max,
         cpu_quota,
         tasks_max,
@@ -311,6 +320,10 @@ fn effective_toml(sb: &Sandbox) -> String {
     out.push_str(&format!("network = {:?}\n", network.to_string()));
     out.push_str(&format!("shell = {:?}\n", sb.shell()));
     out.push_str(&format!("ssh_agent = {ssh_agent}\n"));
+    match background {
+        Some(v) => out.push_str(&format!("background = {v:?}\n")),
+        None => out.push_str("# background unset (terminal keeps its own colour)\n"),
+    }
     out.push_str(&format!("uid_base = {uid_base}\n"));
     for (key, value) in [
         ("memory_max", memory_max),
