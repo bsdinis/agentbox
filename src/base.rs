@@ -552,7 +552,7 @@ passwd -d {name} >/dev/null 2>&1 || true
 install -d -m 750 /etc/sudoers.d
 printf '%%wheel ALL=(ALL:ALL) NOPASSWD: ALL\n' > /etc/sudoers.d/00-agentbox
 chmod 440 /etc/sudoers.d/00-agentbox
-printf 'Defaults env_keep += "ANTHROPIC_API_KEY GITHUB_TOKEN"\n' > /etc/sudoers.d/10-agentbox-env
+printf 'Defaults env_keep += "CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY GITHUB_TOKEN"\n' > /etc/sudoers.d/10-agentbox-env
 chmod 440 /etc/sudoers.d/10-agentbox-env
 "#,
         uid = user.uid,

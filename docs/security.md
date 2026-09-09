@@ -157,21 +157,35 @@ because `agentbox` re-execs under `sudo`, it carries the value across the sudo
 boundary for you (see [design.md](design.md), "Passing the caller's identity
 through sudo"). Nothing to mount.
 
-**OAuth / subscription.** Here the box has to read a token file, so mount only
-the credentials file, **read-only**:
+**OAuth / subscription.** Mint a long-lived token on the host and forward that,
+the same shape as the API key - again mounting no credential file:
+
+```console
+$ claude setup-token          # on the host; prints a long-lived OAuth token
+```
 
 ```toml
 # .agentbox.toml (or ~/.config/agentbox/config.toml)
-ro = ["~/.claude/.credentials.json"]
+pass_env = ["CLAUDE_CODE_OAUTH_TOKEN"]
 ```
 
-Read-only means the box cannot rewrite your credentials or plant anything
-alongside them. It does **not** hide the token: the file is readable inside the
-box, so an untrusted agent could exfiltrate it, and a leaked OAuth token can act
-as your Claude account until you revoke it or it expires. This residual risk is
-inherent whenever the box authenticates *as you* - the API-key setup carries the
-same exposure for `ANTHROPIC_API_KEY`. If that matters, prefer a key you can
-scope and rotate, and revoke it when you are done.
+Export that token in your host shell and every box picks it up.
+
+**Mounting `~/.claude/.credentials.json` instead does not work, and is worth
+knowing why.** It is the obvious thing to try, and the box really can read the
+file, so the failure is confusing: Claude Code asks you to log in anyway. The
+credentials file holds only the *tokens*. Which account they belong to, and the
+fact that you have logged in at all, live in `~/.claude.json`
+(`oauthAccount`, `hasCompletedOnboarding`) - and that file must stay unmapped,
+since the agent rewrites it constantly and it also carries MCP server `command`s
+that would then be host-executed config the box can edit. So the box has tokens
+with no account context, and runs onboarding. Use `setup-token`.
+
+Neither setup hides the secret from the agent: whatever authenticates the box
+authenticates *as you*, so an untrusted agent could exfiltrate it, and a leaked
+token acts as your Claude account until it expires or you revoke it. That
+residual risk is inherent. A `setup-token` token is at least revocable on its
+own, and an API key can additionally be scoped and rotated.
 
 ### Reading host Claude settings
 
@@ -182,9 +196,8 @@ specific files **read-only** - never read-write:
 # .agentbox.toml
 ro = [
   "~/.claude/settings.json",   # box may read it; cannot rewrite it
-  "~/.claude/.credentials.json",
 ]
-pass_env = ["ANTHROPIC_API_KEY"]   # if using the API-key setup instead
+pass_env = ["CLAUDE_CODE_OAUTH_TOKEN"]   # or ANTHROPIC_API_KEY; see above
 ```
 
 Read-only is what makes this safe: any hooks or `command`s in a settings file

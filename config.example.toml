@@ -33,7 +33,7 @@ rw = []
 
 # Host environment variables forwarded into the box when they are set, on top
 # of the built-in TERM, COLORTERM and LANG.
-# pass_env = ["ANTHROPIC_API_KEY", "GITHUB_TOKEN"]
+# pass_env = ["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "GITHUB_TOKEN"]
 
 # Private SSH keys every box on this host may use. agentbox starts a dedicated
 # ssh-agent per box holding ONLY these keys (added with confirm-on-use) and

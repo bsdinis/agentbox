@@ -304,8 +304,8 @@ ro = ["/usr/bin/claude", "/opt/claude-code"]
 ```
 
 ```toml
-packages = ["nodejs", "npm"]        # .agentbox.toml, installed on box creation
-pass_env = ["ANTHROPIC_API_KEY"]    # TERM, COLORTERM and LANG come as standard
+packages = ["nodejs", "npm"]              # .agentbox.toml, installed on box creation
+pass_env = ["CLAUDE_CODE_OAUTH_TOKEN"]    # TERM, COLORTERM and LANG come as standard
 ```
 
 ```toml
@@ -319,17 +319,23 @@ base_packages = [
 ]
 ```
 
-If you want the agent to reuse your host login rather than an API key, map its
-credential file read-only and accept that the box can read it:
+If you want the agent to use your subscription rather than an API key, mint a
+long-lived token on the host and forward that:
 
-```toml
-ro = ["~/.claude/.credentials.json"]
+```console
+$ claude setup-token
 ```
 
-Read-only also means the box cannot rewrite the file when the token expires, so
-that login stops working until you refresh it on the host. An API key through
-`pass_env` has no such expiry. Leave `~/.claude.json` unmapped either way: the
-agent writes to it constantly, and the box keeps its own.
+```toml
+pass_env = ["CLAUDE_CODE_OAUTH_TOKEN"]
+```
+
+Do **not** reach for `ro = ["~/.claude/.credentials.json"]` instead. It looks
+like it should work and does not: that file holds only the tokens, while the
+account they belong to lives in `~/.claude.json`, which has to stay unmapped
+because the agent rewrites it constantly. The box ends up with tokens and no
+account, and Claude Code asks you to log in. See
+[security.md](security.md#authentication).
 
 A reasonable default for unattended runs:
 
