@@ -1,15 +1,17 @@
 //! Assembling a box and handing it to systemd-nspawn: the overlay mount, the
 //! generated settings file, and the launch itself.
 
+use std::ffi::OsStr;
 use std::fs;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 
 use crate::argv;
-use crate::config::{Network, UID_RANGE};
-use crate::host::{dry_run, sh};
+use crate::config::{Network, PROJECT_FILE, UID_RANGE};
+use crate::host::{dry_run, env_var, host, sh};
 use crate::sandbox::{Bind, Sandbox, NSPAWN_DIR, UNIT_DIR};
 use crate::{base, info};
 
@@ -434,6 +436,104 @@ fn set_login_shell(sb: &Sandbox) -> Result<()> {
 }
 
 // --------------------------------------------------------------------------
+// the payload
+// --------------------------------------------------------------------------
+
+/// The PATH systemd-nspawn gives the payload.
+///
+/// nspawn builds the payload's environment itself rather than passing the
+/// caller's through, so mirroring its lookup means searching this list and not
+/// the host's $PATH. Copied from systemd-nspawn; a box that sets PATH through
+/// `[env]` or `pass_env` overrides it.
+const NSPAWN_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+
+fn container_path(sb: &Sandbox) -> String {
+    sb.env()
+        .remove("PATH")
+        .unwrap_or_else(|| NSPAWN_PATH.to_string())
+}
+
+/// Where `program` resolves to, mirroring execvp: a name containing a slash is
+/// a path, taken relative to `cwd`, and anything else is searched for along
+/// `path`, whose empty elements mean `cwd`. `exists` answers for one candidate.
+fn resolve(
+    path: &str,
+    cwd: &Path,
+    program: &Path,
+    exists: impl Fn(&Path) -> bool,
+) -> Option<PathBuf> {
+    if program.as_os_str().as_bytes().contains(&b'/') {
+        // join() drops cwd when the program is already absolute.
+        let full = cwd.join(program);
+        return exists(&full).then_some(full);
+    }
+    path.split(':')
+        .map(|dir| match dir {
+            "" => cwd.join(program),
+            dir => Path::new(dir).join(program),
+        })
+        .find(|full| exists(full))
+}
+
+/// Refuse a payload the box does not have.
+///
+/// Left to nspawn this arrives as `execv(claude) failed: No such file or
+/// directory`, after the box has been created, its login shell set and its
+/// packages installed, and with nothing to say which of those was meant to
+/// provide the program. Checked after `create` rather than before it for that
+/// last reason: a fresh box installs its configured `packages` on the way up,
+/// and those are exactly where the payload may be coming from.
+///
+/// Generous about what counts as found - the entry merely has to exist, with
+/// its symlink unresolved and its execute bits unchecked. Following a
+/// container symlink from the host would chase an absolute target into the
+/// *host's* filesystem and answer about the wrong file, and the case worth
+/// catching is a program that is not in the box at all.
+pub fn check_payload(sb: &Sandbox, program: &OsStr) -> Result<()> {
+    // Unmounted means we cannot answer, so say nothing and let nspawn try.
+    if dry_run() || !is_mounted(&sb.root()) {
+        return Ok(());
+    }
+    let path = container_path(sb);
+    let program = Path::new(program);
+    if resolve(&path, &sb.project, program, |full| {
+        sb.inside(full).symlink_metadata().is_ok()
+    })
+    .is_some()
+    {
+        return Ok(());
+    }
+
+    let mut msg = format!(
+        "{}: not found in box {}\n\
+         A box is a separate system, so a program installed on the host is not in\n\
+         it unless you put it there. Searched {path}.\n",
+        program.display(),
+        sb.name,
+    );
+    // The same lookup against the host answers "where is the copy I meant?",
+    // which is the mapping the user almost always wants.
+    let on_host =
+        env_var("PATH").and_then(|path| resolve(&path, &host().cwd, program, |full| full.exists()));
+    match on_host {
+        Some(found) => msg.push_str(&format!(
+            "The host has one at {0}, which {PROJECT_FILE} can map read-only:\n  \
+             ro = [\"{0}\"]\n\
+             Or install it in the box, now:\n",
+            found.display(),
+        )),
+        None => msg.push_str("Install it in the box, now:\n"),
+    }
+    msg.push_str(&format!(
+        "  agentbox run --root -- pacman -S PKG\n\
+         or on every creation, in {PROJECT_FILE}:\n  \
+         packages = [\"PKG\"]\n\
+         docs/usage.md has the long version."
+    ));
+    bail!("{msg}")
+}
+
+// --------------------------------------------------------------------------
 // launching
 // --------------------------------------------------------------------------
 
@@ -536,6 +636,105 @@ pub use crate::sandbox::state_dir;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An existence oracle over a fixed set of paths, standing in for the
+    /// container rootfs so the lookup can be tested without one.
+    fn has(paths: &'static [&'static str]) -> impl Fn(&Path) -> bool {
+        move |candidate| paths.iter().any(|p| Path::new(p) == candidate)
+    }
+
+    const CWD: &str = "/home/me/project";
+
+    #[test]
+    fn a_bare_name_is_searched_along_the_path() {
+        assert_eq!(
+            resolve(
+                "/usr/local/bin:/usr/bin",
+                Path::new(CWD),
+                Path::new("claude"),
+                has(&["/usr/bin/claude"])
+            ),
+            Some(PathBuf::from("/usr/bin/claude"))
+        );
+    }
+
+    #[test]
+    fn the_earliest_path_element_wins() {
+        assert_eq!(
+            resolve(
+                "/usr/local/bin:/usr/bin",
+                Path::new(CWD),
+                Path::new("claude"),
+                has(&["/usr/bin/claude", "/usr/local/bin/claude"])
+            ),
+            Some(PathBuf::from("/usr/local/bin/claude"))
+        );
+    }
+
+    /// The case that sent a user hunting: nothing of that name in the box.
+    #[test]
+    fn a_program_that_is_nowhere_on_the_path_is_not_found() {
+        assert_eq!(
+            resolve(
+                "/usr/local/bin:/usr/bin",
+                Path::new(CWD),
+                Path::new("claude"),
+                has(&["/usr/bin/git"])
+            ),
+            None
+        );
+    }
+
+    /// execvp does not search for a name containing a slash, so neither do we:
+    /// `./build.sh` must not be found as `/usr/bin/./build.sh`.
+    #[test]
+    fn a_name_containing_a_slash_is_a_path_not_a_search() {
+        let program = Path::new("./build.sh");
+        assert_eq!(
+            resolve(
+                "/usr/bin",
+                Path::new(CWD),
+                program,
+                has(&["/home/me/project/./build.sh"])
+            ),
+            Some(PathBuf::from("/home/me/project/./build.sh"))
+        );
+        assert_eq!(
+            resolve(
+                "/usr/bin",
+                Path::new(CWD),
+                program,
+                has(&["/usr/bin/build.sh"])
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn an_absolute_program_ignores_both_the_path_and_the_working_directory() {
+        assert_eq!(
+            resolve(
+                "/usr/bin",
+                Path::new(CWD),
+                Path::new("/opt/claude-code/bin/claude"),
+                has(&["/opt/claude-code/bin/claude"])
+            ),
+            Some(PathBuf::from("/opt/claude-code/bin/claude"))
+        );
+    }
+
+    #[test]
+    fn an_empty_path_element_means_the_working_directory() {
+        assert_eq!(
+            resolve(
+                "/usr/bin::/bin",
+                Path::new(CWD),
+                Path::new("task"),
+                has(&["/home/me/project/task"])
+            ),
+            Some(PathBuf::from("/home/me/project/task"))
+        );
+    }
 
     #[test]
     fn bind_paths_escape_the_field_separator() {

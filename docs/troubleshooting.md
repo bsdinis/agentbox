@@ -24,6 +24,33 @@ On systemd 249-255 the equivalent of the first is `PrivateUsersChown=`, but
 `owneridmap` has no substitute, so mapped directories would show up as
 `nobody`. Upgrade rather than patching around it.
 
+## `<program>: not found in box <name>`
+
+The box does not have that program. A box is a separate Arch install: it starts
+from the shared base image and whatever `packages` you asked for, so nothing
+you installed on the host is in it unless you put it there. `claude`, `codex`
+and friends are the usual case — see
+[usage.md](usage.md#running-agents-inside).
+
+```console
+[box]$ sudo pacman -S PKG                          # once, in this box
+[box]$ sudo npm install -g @anthropic-ai/claude-code
+```
+
+```toml
+packages = ["PKG"]          # .agentbox.toml, installed when the box is created
+ro = ["/usr/bin/claude", "/opt/claude-code"]    # or map the host's copy
+```
+
+Mapping the host's copy is the cheapest route for something already installed
+there, but map everything it needs: a wrapper in `/usr/bin` that execs a
+payload elsewhere is useless without the payload. The message names the host
+path it found, if there is one.
+
+Older versions let systemd-nspawn discover this instead, which surfaced as
+`execv(claude) failed: No such file or directory` after the box was already
+created, its login shell set and its packages installed.
+
 ## `cargo build` fails
 
 ```console

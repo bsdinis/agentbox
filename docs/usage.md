@@ -17,7 +17,7 @@ stays until you `agentbox reset` or `agentbox rm`.
 ```console
 $ agentbox shell                       # interactive shell in this project's box
 $ agentbox run -- cargo test           # one command, then exit
-$ agentbox run -- claude --dangerously-skip-permissions
+$ agentbox run -- claude --dangerously-skip-permissions   # once it is in the box
 $ agentbox shell --root                # container root, for poking at /etc
 $ agentbox status                      # what is mapped where
 $ agentbox ls                          # every box, and how much each has written
@@ -242,15 +242,25 @@ The point of the exercise. Two things make agents behave better in here:
    `~/.claude`, `~/.npm` and friends persist for that project and do not leak
    between projects.
 
-Getting an agent CLI into a box, cheapest to most reproducible:
+Nothing you installed on the host is in the box, so an agent CLI has to be put
+there. `agentbox run -- claude ...` before that says so:
+`claude: not found in box <name>`. Four ways in, cheapest to most reproducible:
 
 ```console
 [box]$ sudo npm install -g @anthropic-ai/claude-code    # ad hoc, this box only
 ```
 
 ```toml
+# .agentbox.toml - map the copy already on the host, read-only. No download,
+# and the box tracks whatever the host has. Map the whole install, not just the
+# launcher: an Arch claude-code package is a wrapper in /usr/bin execing a
+# binary in /opt.
+ro = ["/usr/bin/claude", "/opt/claude-code"]
+```
+
+```toml
 packages = ["nodejs", "npm"]        # .agentbox.toml, installed on box creation
-pass_env = ["TERM", "ANTHROPIC_API_KEY"]
+pass_env = ["ANTHROPIC_API_KEY"]    # TERM, COLORTERM and LANG come as standard
 ```
 
 ```toml
@@ -264,6 +274,11 @@ credential file read-only and accept that the box can read it:
 ```toml
 ro = ["~/.claude/.credentials.json"]
 ```
+
+Read-only also means the box cannot rewrite the file when the token expires, so
+that login stops working until you refresh it on the host. An API key through
+`pass_env` has no such expiry. Leave `~/.claude.json` unmapped either way: the
+agent writes to it constantly, and the box keeps its own.
 
 A reasonable default for unattended runs:
 

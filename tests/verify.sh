@@ -112,6 +112,11 @@ installed() { box sh -c 'command -v cowsay >/dev/null && echo installed || echo 
 check 'pacman installed a package' "$(installed)" installed
 check 'the package actually runs'  "$(box sh -c 'cowsay moo | grep -c moo')" 1
 check 'host is unaffected'         "$(command -v cowsay || echo none)" none
+# Without the preflight this is nspawn's `execv(...) failed`, printed after the
+# box is already up and with nothing to say the program was never installed.
+MISSING="$("$AGENTBOX" run --dir "$PROJ" -- agentbox-no-such-program 2>&1)"
+check 'a payload missing from the box is named before launch' \
+  "$(grep -c 'not found in box' <<< "$MISSING")" 1
 
 echo
 echo '--- 2. sudo, and its blast radius ---'

@@ -123,6 +123,11 @@ pub fn shell(
     } else {
         cmd.iter().map(oss).collect()
     };
+    // After create, because a box being made now installs its `packages` on the
+    // way up and one of them may be what provides the payload.
+    if let Some(program) = argv.first() {
+        nspawn::check_payload(&sb, program)?;
+    }
     // Named explicitly rather than left to the settings file, which applies to
     // booted launches too (see nspawn::settings_text).
     let user = if as_root { "root" } else { &sb.user.name };
