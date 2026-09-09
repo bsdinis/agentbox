@@ -255,6 +255,30 @@ fn split_spec(spec: &str) -> (String, Option<String>) {
     (unescape(spec), None)
 }
 
+/// Whether `src` is too broad to bind into a box, and a short human reason.
+///
+/// Binds are owneridmap-mapped, so their source is writable inside the box as
+/// the host user. A source that is the filesystem root, the host home itself,
+/// or any ancestor of the home (`/home`, `/`, ...) exposes far more than the
+/// project and is refused. The agentbox state directory - and its subtree and
+/// ancestors - is likewise off limits, since a box could otherwise tamper with
+/// the base image and sibling boxes. Ordinary subdirectories (a reference repo
+/// under the home, a registry cache) are `None` and mount normally.
+pub(crate) fn overbroad_reason(src: &Path, home: &Path, state: &Path) -> Option<&'static str> {
+    if src == Path::new("/") {
+        return Some("the filesystem root");
+    }
+    // `home.starts_with(src)` is true exactly when src == home or src is an
+    // ancestor of home; a subdirectory of home does not match.
+    if home.starts_with(src) {
+        return Some("the host home directory, or an ancestor of it");
+    }
+    if src.starts_with(state) || state.starts_with(src) {
+        return Some("the agentbox state directory, or an ancestor of it");
+    }
+    None
+}
+
 fn sanitize(name: String) -> String {
     let cleaned: String = name
         .chars()
@@ -299,5 +323,34 @@ mod tests {
         assert_eq!(sanitize("".into()), "box");
         assert_eq!(sanitize("!!!".into()), "box");
         assert!(sanitize("x".repeat(200)).len() <= 48);
+    }
+
+    #[test]
+    fn overbroad_sources_are_refused() {
+        let home = Path::new("/home/alice");
+        let state = Path::new("/var/lib/agentbox");
+        // The whole host, via the root - the rw=["/:/x"] vector.
+        assert!(overbroad_reason(Path::new("/"), home, state).is_some());
+        // The host home itself - the rw=["~:/x"] vector.
+        assert!(overbroad_reason(home, home, state).is_some());
+        // An ancestor of the home still exposes the home.
+        assert!(overbroad_reason(Path::new("/home"), home, state).is_some());
+        // The state directory (and its ancestors) protect the base image and
+        // sibling boxes.
+        assert!(overbroad_reason(state, home, state).is_some());
+        assert!(overbroad_reason(Path::new("/var/lib/agentbox/boxes"), home, state).is_some());
+        assert!(overbroad_reason(Path::new("/var/lib"), home, state).is_some());
+    }
+
+    #[test]
+    fn ordinary_sources_still_mount() {
+        let home = Path::new("/home/alice");
+        let state = Path::new("/var/lib/agentbox");
+        // A reference repo under the home, but not the home itself.
+        assert!(overbroad_reason(Path::new("/home/alice/src/refrepo"), home, state).is_none());
+        // A sibling of the home is unrelated to it.
+        assert!(overbroad_reason(Path::new("/home/bob"), home, state).is_none());
+        // An ordinary registry/cache mount elsewhere on the host.
+        assert!(overbroad_reason(Path::new("/srv/registry"), home, state).is_none());
     }
 }

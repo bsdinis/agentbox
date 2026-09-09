@@ -12,7 +12,7 @@ use anyhow::{bail, Context, Result};
 use crate::argv;
 use crate::config::{Network, BACKGROUND_AUTO, PROJECT_FILE, UID_RANGE};
 use crate::host::{dry_run, env_var, host, sh};
-use crate::sandbox::{Bind, Sandbox, NSPAWN_DIR, UNIT_DIR};
+use crate::sandbox::{overbroad_reason, Bind, Sandbox, NSPAWN_DIR, UNIT_DIR};
 use crate::{base, info};
 
 // --------------------------------------------------------------------------
@@ -472,6 +472,22 @@ pub fn check_supported(sb: &Sandbox) -> Result<()> {
     for bind in sb.binds() {
         if let Some(reason) = unsafe_dst(&bind.dst) {
             bail!("refusing an unsafe bind destination: {reason}");
+        }
+        // A bind is mounted with owneridmap, so its source is writable inside
+        // the box as the real host user. The project dir is the working dir the
+        // user chose; a configured rw/ro map whose source is the filesystem
+        // root, the host home, or an ancestor of it would hand the box the whole
+        // host and defeat the sandbox, so refuse it before anything is mounted.
+        if bind.src != sb.project {
+            if let Some(reason) = overbroad_reason(&bind.src, &sb.user.home, state_dir()) {
+                bail!(
+                    "refusing {} map of {}: its source is {}; a box must not be \
+                     granted access to the host beyond its project",
+                    bind.kind(),
+                    bind.src.display(),
+                    reason
+                );
+            }
         }
     }
     let unsupported = unsupported_binds(sb);
