@@ -34,7 +34,7 @@ left blank, and `agentbox config` prints what a project actually resolves to.
 | `cpu_quota` | string | unset | `CPUQuota=`, e.g. `"400%"`. |
 | `tasks_max` | string | unset | `TasksMax=`. |
 | `apparmor` | bool | unset | Apply the shipped AppArmor profile as a defense-in-depth LSM layer. Unset means on-if-available: applied when the profile is loaded on the host, silently skipped otherwise. `true` also warns when it is expected but unavailable; `false` opts out. See below and [contrib/apparmor/README.md](../contrib/apparmor/README.md). |
-| `uid_base` | int | `1310720000` | Host UID that container UID 0 maps to. Multiple of 65536. Only meaningful before `agentbox build`. |
+| `uid_base` | int | `1310720000` | Host UID that container UID 0 maps to. Multiple of 65536. Only meaningful before a box's first mount: each base generation is stamped with the `uid_base` it was shifted for, and a box configured with a different one refuses to mount against it rather than mismatch silently. |
 
 The three caps are unit properties rather than container settings. Every launch
 boots the box's `systemd-nspawn@<box>.service`, so they live in one place: a
@@ -71,7 +71,7 @@ Global-config-only:
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `base_packages` | list of strings | see `DEFAULT_BASE_PACKAGES` in `src/config.rs` | Packages in the shared base image. Replaces the built-in list rather than adding to it. Apply with `agentbox build --refresh`, every box powered off. |
+| `base_packages` | list of strings | see `DEFAULT_BASE_PACKAGES` in `src/config.rs` | Packages in the shared base image. Replaces the built-in list rather than adding to it. Apply with `agentbox build --refresh`, safe to run with boxes still up - it builds a new base generation rather than rewriting the one any running box has mounted. An existing box keeps its old generation until you `agentbox remount <box>` (or `reset`) it onto the new one; see [setup.md](setup.md#adding-a-package-to-every-box). |
 
 In the global file you may put the per-box keys either at the top level or
 under a `[defaults]` table; both work, and `[defaults]` is clearer.
@@ -218,10 +218,13 @@ it in `.agentbox.toml`.
 
 | Path | Contents |
 | --- | --- |
-| `/var/lib/agentbox/base` | Shared base image, the overlay lower layer. |
+| `/var/lib/agentbox/bases/<id>/` | One base generation - a full Arch install, one directory per `agentbox build`. A running box's overlay keeps whichever generation it was mounted on as its lowerdir even after a later build; unreferenced ones are garbage-collected opportunistically (see `docs/design.md`). |
+| `/var/lib/agentbox/bases/<id>.uid_base` | The `uid_base` that generation's on-disk ownership was shifted for. A box configured with a different one refuses to mount against it. |
+| `/var/lib/agentbox/bases/current` | Which generation a fresh mount targets. Only ever repointed once a whole build has finished. |
 | `/var/lib/agentbox/boxes/<box>/upper` | Every byte this box has written. |
 | `/var/lib/agentbox/boxes/<box>/work` | overlayfs scratch area. Do not touch. |
 | `/var/lib/agentbox/boxes/<box>/meta.json` | Project path, UID base, network mode. |
+| `/var/lib/agentbox/boxes/<box>/overlay.id` | Which base generation this box's overlay is mounted on. Compared against `bases/current` by `agentbox ls`'s OVERLAY column, and against what's actually on disk to decide `stale`. |
 | `/var/lib/agentbox/boxes/<box>/ssh-agent/` | Present only with `ssh_keys` set: the box-scoped ssh-agent's socket and pid, mode 0700, owned by you. Torn down by `down`, `reset` and `rm`. |
 | `/var/lib/machines/<box>` | Mount point of the assembled rootfs. |
 | `/etc/systemd/nspawn/<box>.nspawn` | Generated settings. Regenerated on every launch — edit the TOML, not this. |

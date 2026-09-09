@@ -69,20 +69,29 @@ neovim: 2311 total files, 1 altered file
 
 pacman is telling the truth: the package is installed and every other file in
 it is fine. What is broken is this box's *view* of the base image. The image
-was rewritten — `agentbox build --refresh` or `--force` — while the box's
-overlay was mounted on it, and overlayfs does not tolerate a lower layer
-changing underneath it. `readdir` picks the new name up from the lower layer,
-but a lookup that resolved *before* the rewrite (any `which nvim` that came
-back empty) is still cached as a miss. So the one path something had already
-asked about stays missing, while everything the refresh added under paths
-nobody had touched works normally — which is why it looks like a single
-corrupt file rather than a stale mount.
+underneath a box's overlay was rewritten while that overlay was mounted on it,
+and overlayfs does not tolerate a lower layer changing underneath it. `readdir`
+picks the new name up from the lower layer, but a lookup that resolved
+*before* the rewrite (any `which nvim` that came back empty) is still cached
+as a miss. So the one path something had already asked about stays missing,
+while everything the refresh added under paths nobody had touched works
+normally — which is why it looks like a single corrupt file rather than a
+stale mount.
 
-This is now prevented, and when it does turn up it is named rather than left
-for you to deduce. `agentbox build` refuses while any box is alive and unmounts
-the idle ones before touching the image, so a build cannot arrange it any more;
-and every overlay records which image it is a view of, so one that has fallen
-behind shows up as `stale`:
+`agentbox build --refresh|--force` cannot arrange this any more: the base
+lives as a sequence of *generations* (`/var/lib/agentbox/bases/<id>/`), and a
+build always writes a brand new one rather than rewriting the one a running
+box has open — `--refresh` copies the current generation forward and upgrades
+the copy, `--force` bootstraps a fresh one from scratch, and either way the
+directory any live overlay already has as its lowerdir is never touched. A
+build no longer refuses while a box is alive, and no longer needs to unmount
+anything, because there is nothing left it could break by running.
+
+So this now shows up only two ways: a generation genuinely vanishing out from
+under a mounted box (agentbox never deletes one anything still has mounted,
+so this means a bug), or a mount left by a version of agentbox that predates
+generations, with no matching record at all. Either reads as `stale` in
+`agentbox ls`:
 
 ```console
 $ agentbox ls
@@ -90,8 +99,28 @@ BOX             PROJECT           OVERLAY  BOOTED    WRITES
 myproj-a1b2c3d  /home/you/myproj  stale    inactive  184M
 ```
 
-Starting the box fixes it: a launch remounts a stale overlay before the box
-boots. `agentbox remount <box>` does the same without starting anything.
+A box mounted on an older generation than the newest one is *not* this
+problem, and is not `stale` — it is the ordinary state of a box that predates
+the last `agentbox build`, shown informationally instead:
+
+```console
+$ agentbox ls
+BOX             PROJECT           OVERLAY                       BOOTED    WRITES
+myproj-a1b2c3d  /home/you/myproj  mounted (g...041, current g...199)  active    184M
+```
+
+Nothing is wrong there; the box just hasn't been moved onto the newer
+generation, and nothing does that on its own while its overlay stays mounted -
+`agentbox down` stops the box but never unmounts it, so a plain relaunch
+reattaches to the exact same mount it already had. `agentbox remount <box>`
+(needs the box stopped first) moves it on purpose; `agentbox reset <box>` does
+too, but by also clearing its writes.
+
+Starting the box fixes actual staleness (the `stale` case above): a launch
+remounts a stale overlay before the box boots, since there is nothing valid
+left for it to keep. `agentbox remount <box>` does the same without starting
+anything, and is what to reach for on an old-but-fine generation, since a plain
+relaunch will not move it.
 
 ```console
 $ agentbox down <box>       # only if it is running - a live overlay cannot be swapped
@@ -103,11 +132,6 @@ Neither costs the box anything: its writes are in `upper` on disk, not in the
 mount, so all a remount discards is the kernel's cached view of the layer
 below. `agentbox reset <box>` cures it too, but by deleting everything the box
 has ever written — a far larger hammer than this needs.
-
-An overlay mounted by an agentbox older than this reads as `stale` as well,
-having no record of what it was mounted on. That is the intended answer rather
-than a false positive: those are exactly the mounts that could be straddling a
-rebuild. One remount settles it for good.
 
 To repair one program *without* dropping the session you are sitting in — a
 remount cannot happen underneath a running box, and you may not want to leave —
@@ -268,11 +292,12 @@ Failed to change to specified working directory /tmp/...: Permission denied
 
 ## `no base image yet - run agentbox build first`
 
-Expected on a fresh install. If you *have* built it, check the image is where
-the tool looks:
+Expected on a fresh install. If you *have* built it, check the current
+generation is where the tool looks:
 
 ```console
-$ sudo ls /var/lib/agentbox/base/usr
+$ sudo cat /var/lib/agentbox/bases/current
+$ sudo ls /var/lib/agentbox/bases/$(sudo cat /var/lib/agentbox/bases/current)/usr
 ```
 
 ## Base build fails during bootstrap
@@ -287,9 +312,15 @@ $ head -5 /etc/pacman.d/mirrorlist      # a dead mirror stalls the bootstrap
 
 The build reuses the host's package cache (`/var/cache/pacman/pkg`) and
 keyring (`/etc/pacman.d/gnupg`), so a broken host pacman breaks the build. A
-partial image is safe to discard: `agentbox build --force`. It is worth
-discarding rather than ignoring — a half-built image does not announce itself,
-it just makes every later box fail with `chsh: user ... does not exist`.
+partial generation is safe to ignore: it was never pointed at by `current` (a
+build only advances that once every stage has finished), so the next
+`agentbox build` sees the same "no complete image yet" state as before the
+failed attempt and simply tries again from scratch - no `--force` needed on a
+first build. Whatever the failed attempt left behind under
+`/var/lib/agentbox/bases/` is cleaned up on its own the next time any agentbox
+command runs. If a *previous, successful* build already put a good generation
+in place and you're now retrying a failed `--refresh`/`--force`, use the same
+flag again.
 
 ## `chsh: user "<you>" does not exist`, or `could not create box`
 
@@ -297,14 +328,24 @@ The base image is incomplete: a build that died part way through leaves a
 bootstrapped rootfs with no sandbox user in it, and every box built on top then
 fails at the point where it tries to set that user's login shell.
 
+`agentbox build` only points `current` at a generation once every stage —
+including the one that creates that user — has finished, so a build that died
+mid-way leaves its half-built directory orphaned rather than adopted; the
+next `agentbox build` (or the next `ls`/`down`/`reset`/`rm`/`remount`) reclaims
+it on its own, and `current` still names whatever the last complete build
+produced (or nothing, on a fresh install). This entry is now mainly historical,
+but check the generation actually in use if you still hit it:
+
 ```console
-$ sudo test -f /var/lib/agentbox/base/etc/sudoers.d/00-agentbox && echo complete
-$ sudo grep "^$USER:" /var/lib/agentbox/base/etc/passwd
+$ sudo cat /var/lib/agentbox/bases/current
+$ id=$(sudo cat /var/lib/agentbox/bases/current)
+$ sudo test -f /var/lib/agentbox/bases/$id/etc/sudoers.d/00-agentbox && echo complete
+$ sudo grep "^$USER:" /var/lib/agentbox/bases/$id/etc/passwd
 ```
 
 Neither of those is present in a stump. `agentbox build --force` rebuilds from
-scratch; `--refresh` will not help, since it runs pacman inside an image whose
-ownership was never shifted.
+scratch; `--refresh` will not help, since it copies whatever `current` names
+forward and runs pacman inside it, and a stump was never shifted.
 
 ## `pacman` inside the box rejects signatures
 

@@ -64,7 +64,7 @@ survived.
 | `src/config.rs` | layered TOML, `DEFAULT_BASE_PACKAGES`, `UID_RANGE`, `expand()` |
 | `src/sandbox.rs` | one box: naming, paths, bind list, env, uid shift, `split_spec`, `overbroad_reason` |
 | `src/nspawn.rs` | the big one: overlay mount/umount and staleness, generated `.nspawn` text, unit drop-ins, safety checks, box-scoped ssh-agent, launch/attach |
-| `src/base.rs` | the base image: five build stages, `release_boxes()`, the `base.id` identity stamp |
+| `src/base.rs` | the base image: five build stages, base generations under `bases/<id>/`, `gc_generations()` |
 | `src/session.rs` | who owns a running box and when it powers off |
 | `src/cmds.rs` | subcommand bodies plus `[BOX]` argument resolution (`classify`/`resolve`/`load`) |
 
@@ -83,16 +83,24 @@ A `run` payload goes after `--`: `agentbox run mybox -- cmd`.
 
 Most of these are fixes for real failures. Read the reason before changing the code.
 
-**Overlayfs never revalidates its lower layer.** The base image is the `lowerdir` of
-every mounted box, so a mount that straddles a `build` keeps serving its cached view for
-the life of the mount — a file the build added is listed by `readdir` and `ENOENT` on
-open (`b41f4b8`). Hence: `build --refresh|--force` refuses by name while any box is
-running, and unmounts every idle mounted box first (`base::release_boxes`); unmounting an
-idle box is free, since its writes live in `upper` on disk. As a second line of defence
-each build stamps `base.id` and each mount records `overlay.id`; a mismatch, or no record
-at all, shows as `stale` in `agentbox ls`, and a launch or `agentbox remount` cures it
-losslessly. `base.id` lives *beside* the image, not inside it — a box would otherwise
-read its own cached copy from the stale lower layer.
+**Overlayfs never revalidates its lower layer.** A mount that straddles a rewrite of its
+`lowerdir` keeps serving its cached view for the life of the mount — a file the rewrite
+added is listed by `readdir` and `ENOENT` on open (`b41f4b8`). The fix is generations, not
+prevention: the image lives under `/var/lib/agentbox/bases/<id>/`, one directory per
+build, and `build` never mutates a directory a live box might have open — it either
+copies the current generation forward and upgrades the copy (`--refresh`) or bootstraps a
+whole new one from scratch (`--force`, or the first build), then swaps
+`bases/current` to name it. A generation sticks around exactly as long as `current` names
+it or some *mounted* box's `overlay.id` does; `base::gc_generations` deletes anything else,
+run opportunistically from `build`, `down`, `reset`, `rm`, `remount` and `ls` rather than
+as a separate step. Each generation is stamped with the `uid_base` it was shifted for
+(`bases/<id>.uid_base`, beside the directory rather than inside it — a box would otherwise
+read its own cached copy through the overlay); `nspawn::mount` refuses rather than mismatch
+a box against a generation shifted for a different one. `agentbox ls`'s `stale` now means
+a box's recorded generation is gone from disk entirely (a GC race, or a mount predating
+generations) — a box happily running on an older-but-still-present generation is normal,
+shown as `mounted (g..., current g...)`, and `agentbox remount` still cures either case by
+dropping the overlay and mounting fresh against `current`.
 
 Overlay options stay pinned conservative — `index=off,metacopy=off,redirect_dir=off,
 xino=off` — because they interact badly with an image whose UIDs are shifted.
@@ -175,13 +183,16 @@ when `.git` is a file (worktrees and submodules).
 
 ## Host state and porting
 
-Everything below is root-owned: `/var/lib/agentbox/{base,base.id}`,
+Everything below is root-owned: `/var/lib/agentbox/bases/{<id>,<id>.uid_base,current}`
+(one subtree per generation, plus the pointer naming the current one),
 `/var/lib/agentbox/boxes/<box>/{upper,work,meta.json,overlay.id,runtime/}`,
 `/var/lib/machines/<box>` (the overlay mountpoint),
 `/etc/systemd/nspawn/<box>.nspawn`, and
 `/etc/systemd/system/systemd-nspawn@<box>.service.d/` plus a `daemon-reload`. To clear
 test debris: `agentbox rm <box>`, then `sudo rm -rf /var/lib/agentbox` and
-`sudo rm -f /etc/systemd/nspawn/*.nspawn` (`docs/setup.md:170-178`).
+`sudo rm -f /etc/systemd/nspawn/*.nspawn` (`docs/setup.md:170-178`). (This layout replaced
+a single mutable `/var/lib/agentbox/{base,base.id}` — a host with that old layout has no
+`current` to read and just looks like it needs a fresh `agentbox build`.)
 
 Host requirements: systemd >= 256, Linux >= 5.12, `systemd-container`, host `pacman`
 (so `build` is Arch-only), an ID-mapped-mount-capable filesystem under the code, `sudo`.

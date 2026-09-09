@@ -1,6 +1,17 @@
 //! Building the shared base image: a normal Arch install, then a one-time
 //! ownership shift into the container UID range.
+//!
+//! The image lives as a sequence of *generations* under `bases/<id>/`, not one
+//! mutable directory. A box's overlay has a generation directory open as its
+//! lowerdir for the life of the mount, and overlayfs never revalidates that -
+//! a file a rebuild adds can be listed by `readdir` and still `ENOENT` on open,
+//! for as long as the mount lives. Writing each build to a fresh directory
+//! instead of mutating `current` in place means a live box's lowerdir is
+//! simply never touched by anything `build` does, so `build` need not refuse
+//! or unmount anything running. A generation only goes away once nothing
+//! references it any more - see `gc_generations`.
 
+use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -12,57 +23,147 @@ use crate::config::{self, UID_RANGE};
 use crate::host::{dry_run, host, oss, sh};
 use crate::info;
 use crate::nspawn;
-use crate::sandbox::{state_dir, MACHINES};
+use crate::sandbox::state_dir;
 
-pub fn image() -> PathBuf {
-    state_dir().join("base")
+pub fn bases_dir() -> PathBuf {
+    state_dir().join("bases")
 }
 
-/// Where the image's identity is stamped. Beside the image rather than inside
-/// it: a box would otherwise read its own lower layer's copy through the
-/// overlay, which is the one place it cannot be trusted to be current, and
-/// `--force` deletes the image directory wholesale.
-fn id_path() -> PathBuf {
-    state_dir().join("base.id")
+fn current_path() -> PathBuf {
+    bases_dir().join("current")
 }
 
-/// What the image is right now, changed by every build. An empty string means
-/// an image built before this was stamped, which is indistinguishable from any
-/// other unstamped image - so an overlay carrying the same empty id is left
-/// alone rather than reported stale on every launch.
-pub fn id() -> String {
-    fs::read_to_string(id_path())
+pub fn generation_dir(id: &str) -> PathBuf {
+    bases_dir().join(id)
+}
+
+/// The generation a fresh mount should target, or an empty string if nothing
+/// has ever been built. Never rewritten in place - `set_current` replaces the
+/// whole file - so a reader never sees a half-written id.
+pub fn current_id() -> String {
+    fs::read_to_string(current_path())
         .unwrap_or_default()
         .trim()
         .to_string()
 }
 
-/// Give the image a new identity, so every overlay mounted on the old one can
-/// tell that what is underneath it has changed.
-fn stamp() -> Result<()> {
+/// The generation new mounts should use right now.
+pub fn image() -> PathBuf {
+    generation_dir(&current_id())
+}
+
+fn set_current(id: &str) -> Result<()> {
     if dry_run() {
         return Ok(());
     }
+    fs::create_dir_all(bases_dir())?;
+    fs::write(current_path(), format!("{id}\n"))
+        .with_context(|| format!("cannot write {}", current_path().display()))
+}
+
+/// A generation id that sorts and reads like the timestamp it is, prefixed so
+/// it is never mistaken for a bare number in a path or a message.
+fn new_generation_id() -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    fs::write(id_path(), format!("{now}\n"))
-        .with_context(|| format!("cannot stamp {}", id_path().display()))
+    format!("g{now}")
 }
 
-pub fn require() -> Result<()> {
-    if image().join("usr").exists() {
-        return Ok(());
-    }
+pub fn generation_exists(id: &str) -> bool {
+    !id.is_empty() && generation_dir(id).join("usr").exists()
+}
+
+/// Where a generation's uid_base is stamped: beside the generation directory
+/// rather than inside it, for the same reason the old `base.id` lived beside
+/// the image - a box would otherwise read its own lower layer's cached copy,
+/// which is the one place it cannot be trusted to be current.
+fn generation_uid_base_path(id: &str) -> PathBuf {
+    bases_dir().join(format!("{id}.uid_base"))
+}
+
+/// Record what a generation's on-disk ownership was shifted for, so a box
+/// configured with a different `uid_base` can be refused at mount time
+/// instead of silently seeing ownership that does not match its own
+/// `PrivateUsers=` range.
+fn stamp_generation(id: &str, uid_base: u32) -> Result<()> {
     if dry_run() {
-        crate::warn(&format!(
-            "no base image at {} yet (dry run continues)",
-            image().display()
-        ));
         return Ok(());
     }
-    bail!("no base image yet - run `agentbox build` first");
+    fs::create_dir_all(bases_dir())?;
+    let path = generation_uid_base_path(id);
+    fs::write(&path, format!("{uid_base}\n"))
+        .with_context(|| format!("cannot stamp {}", path.display()))
+}
+
+/// What a generation was shifted for, or `None` if it predates this being
+/// recorded - nothing to check a box's configured uid_base against, so
+/// `nspawn::mount` lets it through rather than refusing over a record that
+/// was never written.
+pub fn generation_uid_base(id: &str) -> Option<u32> {
+    fs::read_to_string(generation_uid_base_path(id))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// Every generation id under `bases/`.
+fn generations() -> Vec<String> {
+    let Ok(entries) = fs::read_dir(bases_dir()) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter(|entry| entry.path().is_dir())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect()
+}
+
+/// Which of `all` the generations on disk are safe to delete: everything
+/// except `current` and whatever a *mounted* box's own `overlay.id` names. An
+/// idle (unmounted) box pins nothing here even if its own record names an
+/// older generation, because its next mount always targets `current` anyway
+/// (see `nspawn::overlay_stale`'s remount-on-launch) - so there is nothing for
+/// its stale record to protect. Pure and separate from `gc_generations` so the
+/// set logic is testable without a state directory or a real mount.
+fn unreferenced(all: &[String], mounted_ids: &[String], current: &str) -> Vec<String> {
+    let mut pinned: HashSet<&str> = mounted_ids.iter().map(String::as_str).collect();
+    if !current.is_empty() {
+        pinned.insert(current);
+    }
+    all.iter()
+        .filter(|id| !pinned.contains(id.as_str()))
+        .cloned()
+        .collect()
+}
+
+/// Delete every generation nothing references any more.
+///
+/// Best-effort and silent about it: this runs incidentally on the way through
+/// several commands (`build`, `down`, `reset`, `rm`, `remount`, `ls`), and a
+/// sweep that fails to delete something - a race with another process still
+/// reading it, say - should leave it for the next sweep rather than fail the
+/// caller's own command.
+pub fn gc_generations() {
+    if dry_run() {
+        return;
+    }
+    let mounted_ids: Vec<String> = nspawn::mounted_boxes()
+        .iter()
+        .filter_map(|name| nspawn::overlay_generation(name))
+        .collect();
+    for id in unreferenced(&generations(), &mounted_ids, &current_id()) {
+        info(&format!(
+            "garbage-collecting unreferenced base generation {id}"
+        ));
+        let _ = sh(argv!["rm", "--one-file-system", "-rf", generation_dir(&id)])
+            .quiet()
+            .allow_fail()
+            .run();
+        let _ = fs::remove_file(generation_uid_base_path(&id));
+    }
 }
 
 /// Minimal pacman config for the bootstrap. The host's mirrorlist is included
@@ -83,15 +184,20 @@ Include = /etc/pacman.d/mirrorlist
 Include = /etc/pacman.d/mirrorlist
 ";
 
-/// Run a command inside the half-built image.
-fn in_image(cmd: Vec<OsString>, uid_base: Option<u32>, host_cache: bool) -> Result<()> {
+/// Run a command inside a half-built (or being-refreshed) generation at `base`.
+fn in_image(
+    base: &Path,
+    cmd: Vec<OsString>,
+    uid_base: Option<u32>,
+    host_cache: bool,
+) -> Result<()> {
     // --background= for the same reason as the box launches: a build is long
     // and interactive, and there is no config to consult this early.
     let mut args = argv![
         "systemd-nspawn",
         "-q",
         "-D",
-        image(),
+        base,
         "--as-pid2",
         "--register=no",
         "--resolv-conf=copy-host",
@@ -112,79 +218,64 @@ fn in_image(cmd: Vec<OsString>, uid_base: Option<u32>, host_cache: bool) -> Resu
     sh(args).run().map(|_| ())
 }
 
-/// Take every box off the base image before it is rewritten.
-///
-/// A box's overlay has the base as its `lowerdir`, and overlayfs does not
-/// tolerate a lower layer changing underneath it: the box goes on serving the
-/// view it cached, so a file `--refresh` adds can end up half-visible - listed
-/// by `readdir`, `ENOENT` on open - and stay that way for the life of the
-/// mount. `--force` is worse still, deleting the layer outright.
-///
-/// A stopped box is no obstacle: unmounting it costs nothing, since its writes
-/// live in `upper` on disk and the next launch remounts on demand. A running
-/// box has to be powered off by hand, so name the boxes and stop.
-fn release_boxes() -> Result<()> {
-    let running: Vec<String> = nspawn::boxes()
-        .into_iter()
-        .filter(|name| nspawn::service_active(name))
-        .collect();
-    if !running.is_empty() {
-        bail!(
-            "these boxes are running on the base image: {}\n\
-             power them off first (`agentbox down <box>`, or leave the `shell`/`run` \
-             sessions holding them); changing the image under a live box corrupts \
-             what that box sees",
-            running.join(", ")
-        );
+pub fn require() -> Result<()> {
+    if generation_exists(&current_id()) {
+        return Ok(());
     }
-    // Everything left is idle, so nothing here can fail for being in use.
-    for name in nspawn::mounted_boxes() {
-        info(&format!("taking idle box {name} off the base image"));
-        nspawn::umount_root(&Path::new(MACHINES).join(&name))?;
+    if dry_run() {
+        crate::warn(&format!(
+            "no base image at {} yet (dry run continues)",
+            image().display()
+        ));
+        return Ok(());
     }
-    Ok(())
+    bail!("no base image yet - run `agentbox build` first");
 }
 
 pub fn build(refresh: bool, force: bool) -> Result<()> {
+    // Opportunistic: whatever a previous command's teardown left unreferenced
+    // is worth reclaiming before spending disk on a new generation.
+    gc_generations();
+
     let uid_base = config::global_uid_base()?;
     let packages = config::base_packages()?;
-    let base = image();
+    let current = current_id();
+    let exists = generation_exists(&current);
 
-    if base.exists() && !refresh && !force {
+    if exists && !refresh && !force {
         bail!(
-            "base image already exists at {} (use --refresh to update it, \
+            "base image already exists (generation {current}) (use --refresh to update it, \
              --force to rebuild from scratch)",
-            base.display()
         );
     }
-    // Both destructive paths below rewrite the layer every box is overlaying,
-    // so take the boxes off it first.
-    if base.exists() && (refresh || force) {
-        release_boxes()?;
+
+    // Refreshing an existing image: copy it forward into a new generation and
+    // upgrade the copy, never touching whatever any live box has open. `force`
+    // takes precedence when both are given, exactly as it did when refresh
+    // meant "pacman -Syu in place" - see the branch below.
+    if exists && refresh && !force {
+        return refresh_generation(&current, uid_base, &packages);
     }
-    if force && base.exists() {
+
+    if force && exists {
         crate::warn(
             "existing boxes keep the writes they made over the old image; \
              `agentbox reset <box>` if one misbehaves on the new one",
         );
-        info(&format!("removing {}", base.display()));
-        sh(argv!["rm", "--one-file-system", "-rf", &base]).run()?;
     }
 
-    // Refreshing an existing image: it is already shifted, so use the same
-    // user namespace the boxes use.
-    if base.exists() {
-        info("refreshing base image");
-        let mut cmd = argv!["/usr/bin/pacman", "-Syu", "--noconfirm", "--needed"];
-        cmd.extend(packages.iter().map(oss));
-        in_image(cmd, Some(uid_base), false)?;
-        return stamp();
-    }
-
+    // The first build, or --force: bootstrap a wholly new generation from
+    // scratch. This never touches whatever `current` still names, so a build
+    // racing a live box is a non-event - the box's overlay keeps serving the
+    // directory it already opened, untouched, until nothing references it any
+    // more (see `gc_generations`).
+    let id = new_generation_id();
+    let base = generation_dir(&id);
     bootstrap(&base)?;
 
     info("initialising the pacman keyring inside the image");
     in_image(
+        &base,
         argv![
             "/bin/bash",
             "-euo",
@@ -202,10 +293,10 @@ pub fn build(refresh: bool, force: bool) -> Result<()> {
     ));
     let mut cmd = argv!["/usr/bin/pacman", "-Sy", "--noconfirm", "--needed"];
     cmd.extend(packages.iter().map(oss));
-    in_image(cmd, None, true)?;
+    in_image(&base, cmd, None, true)?;
 
     info("configuring the image");
-    in_image(argv!["/bin/bash", "-c", setup_script()], None, false)?;
+    in_image(&base, argv!["/bin/bash", "-c", setup_script()], None, false)?;
 
     // The reason boxes start instantly: with the on-disk ownership already
     // matching the container's user namespace, nothing has to be chowned or
@@ -226,8 +317,44 @@ pub fn build(refresh: bool, force: bool) -> Result<()> {
     ])
     .run()?;
 
-    stamp()?;
-    info(&format!("base image ready: {}", base.display()));
+    stamp_generation(&id, uid_base)?;
+    set_current(&id)?;
+    info(&format!(
+        "base image ready: {} (generation {id})",
+        base.display()
+    ));
+    Ok(())
+}
+
+/// `--refresh`: copy the current generation's tree into a fresh one and
+/// `pacman -Syu` the copy, rather than mutating `current` in place. A live
+/// box's overlay has `current`'s directory open as its lowerdir, and
+/// overlayfs never revalidates that once mounted, so writing into it under a
+/// live mount would serve that mount a half-updated tree for the rest of its
+/// life. `--reflink=auto` costs nothing where it works; this host's ext4 does
+/// not support it, so this pays the image's full size in disk and time - but
+/// the copy, never the original, is what gets upgraded, so nothing already
+/// mounted is ever touched.
+fn refresh_generation(current: &str, uid_base: u32, packages: &[String]) -> Result<()> {
+    let old = generation_dir(current);
+    let id = new_generation_id();
+    let new = generation_dir(&id);
+    info(&format!(
+        "copying base generation {current} to {id} for refresh"
+    ));
+    sh(argv!["cp", "-a", "--reflink=auto", &old, &new]).run()?;
+
+    info("refreshing the copy");
+    let mut cmd = argv!["/usr/bin/pacman", "-Syu", "--noconfirm", "--needed"];
+    cmd.extend(packages.iter().map(oss));
+    in_image(&new, cmd, Some(uid_base), false)?;
+
+    stamp_generation(&id, uid_base)?;
+    set_current(&id)?;
+    info(&format!(
+        "base image ready: {} (generation {id})",
+        new.display()
+    ));
     Ok(())
 }
 
@@ -567,7 +694,7 @@ fn shell_quote(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::first_shared;
+    use super::*;
 
     /// `findmnt -R -n -P -o TARGET,PROPAGATION` output, one mount per line.
     fn findmnt(mounts: &[(&str, &str)]) -> String {
@@ -624,5 +751,40 @@ mod tests {
     #[test]
     fn a_line_without_a_propagation_field_is_not_treated_as_shared() {
         assert_eq!(first_shared("TARGET=\"/base/dev\"\n"), None);
+    }
+
+    fn ids(names: &[&str]) -> Vec<String> {
+        names.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn current_and_every_mounted_generation_are_kept() {
+        let all = ids(&["g1", "g2", "g3"]);
+        // g1 is current, g2 is a mounted box's own record, g3 is neither.
+        assert_eq!(unreferenced(&all, &ids(&["g2"]), "g1"), ids(&["g3"]));
+    }
+
+    #[test]
+    fn nothing_is_deleted_while_everything_is_referenced() {
+        let all = ids(&["g1", "g2"]);
+        assert!(unreferenced(&all, &ids(&["g2"]), "g1").is_empty());
+    }
+
+    #[test]
+    fn an_idle_boxs_stale_record_pins_nothing() {
+        // g1 exists on disk but no box is *mounted* on it (mounted_ids empty),
+        // even though it might be some idle box's leftover overlay.id: an idle
+        // box's next mount always targets current, so its old record protects
+        // nothing.
+        let all = ids(&["g1", "g2"]);
+        assert_eq!(unreferenced(&all, &[], "g2"), ids(&["g1"]));
+    }
+
+    #[test]
+    fn no_current_generation_yet_pins_nothing_by_itself() {
+        // Before the first build, current_id() is empty; that must never match
+        // a real (non-empty) generation id and accidentally spare it.
+        let all = ids(&["g1"]);
+        assert_eq!(unreferenced(&all, &[], ""), ids(&["g1"]));
     }
 }

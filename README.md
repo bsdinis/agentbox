@@ -114,7 +114,8 @@ contrib/         the original Python prototype (reference) and an optional
 State on disk:
 
 ```
-/var/lib/agentbox/base                 shared read-only Arch rootfs (the lower layer)
+/var/lib/agentbox/bases/<id>/           one base generation (the lower layer); bases/current names the newest
+/var/lib/agentbox/boxes/<box>/overlay.id which generation this box's overlay is mounted on
 /var/lib/agentbox/boxes/<box>/upper     everything this box has written
 /var/lib/agentbox/boxes/<box>/meta.json project path, UID range, network mode
 /var/lib/agentbox/boxes/<box>/runtime/  who booted the box, and its live sessions

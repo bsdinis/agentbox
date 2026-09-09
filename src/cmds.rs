@@ -373,7 +373,12 @@ pub fn up(spec: &Option<String>, overrides: &Overrides) -> Result<()> {
 
 pub fn down(spec: &Option<String>, overrides: &Overrides) -> Result<()> {
     let sb = load(spec, overrides)?;
-    session::down(&sb)
+    session::down(&sb)?;
+    // Powering off doesn't unmount the overlay, but something else pinning a
+    // generation may have changed since this box last touched the state
+    // directory, so it costs nothing to sweep here too.
+    base::gc_generations();
+    Ok(())
 }
 
 /// Drop a box's overlay and mount it again, so it sees the base image as it is
@@ -399,6 +404,8 @@ pub fn remount(spec: &Option<String>, overrides: &Overrides) -> Result<()> {
     }
     nspawn::umount(&sb)?;
     nspawn::mount(&sb)?;
+    // The old generation may have just lost its last reference.
+    base::gc_generations();
     if !dry_run() {
         println!("remounted {} on the current base image", sb.name);
     }
@@ -406,6 +413,9 @@ pub fn remount(spec: &Option<String>, overrides: &Overrides) -> Result<()> {
 }
 
 pub fn list() -> Result<()> {
+    // Best effort, and cheap when there's nothing to do: keeps the OVERLAY
+    // column from listing a generation that's about to be reclaimed anyway.
+    base::gc_generations();
     let boxes = nspawn::state_dir().join("boxes");
     let Ok(entries) = fs::read_dir(&boxes) else {
         return Ok(());
@@ -429,15 +439,7 @@ pub fn list() -> Result<()> {
         let project = box_project(name)
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "?".into());
-        let overlay = if nspawn::overlay_stale(name) {
-            // Mounted, but on an image that has since changed: `agentbox
-            // remount` is the fix, and the troubleshooting entry says why.
-            "stale"
-        } else if nspawn::is_mounted(&Path::new(crate::sandbox::MACHINES).join(name)) {
-            "mounted"
-        } else {
-            "-"
-        };
+        let overlay = nspawn::overlay_label(name);
         let booted = sh(argv![
             "systemctl",
             "is-active",
@@ -448,7 +450,7 @@ pub fn list() -> Result<()> {
         rows.push([
             name.clone(),
             project,
-            overlay.into(),
+            overlay,
             if booted.is_empty() {
                 "-".into()
             } else {
@@ -598,6 +600,8 @@ pub fn reset(spec: &Option<String>, overrides: &Overrides, yes: bool) -> Result<
     nspawn::umount(&sb)?;
     sh(argv!["rm", "--one-file-system", "-rf", sb.dir()]).run()?;
     nspawn::create(&sb)?;
+    // The overlay just dropped and remounted may have freed a generation.
+    base::gc_generations();
     println!("reset {}", sb.name);
     Ok(())
 }
@@ -620,6 +624,8 @@ pub fn remove(spec: &Option<String>, overrides: &Overrides, yes: bool) -> Result
         fs::remove_file(sb.settings())?;
     }
     nspawn::clear_unit_caps(&sb)?;
+    // The box's overlay is gone for good, which may have freed a generation.
+    base::gc_generations();
     println!("removed {}", sb.name);
     Ok(())
 }

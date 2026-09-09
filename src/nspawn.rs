@@ -34,40 +34,58 @@ pub fn is_mounted(path: &Path) -> bool {
     })
 }
 
-/// lower = the shared base image, upper = this box's writes. The overlay
-/// features that rewrite how upper refers to lower are switched off: they buy
-/// little here and interact badly with an image whose UIDs were shifted.
+/// lower = a base generation, upper = this box's writes. The overlay features
+/// that rewrite how upper refers to lower are switched off: they buy little
+/// here and interact badly with an image whose UIDs were shifted.
+///
+/// The lowerdir is whichever generation `base::current_id()` names *right
+/// now* - fixed for the life of the mount once it's made, since overlayfs
+/// never revalidates it. That's what makes `agentbox build` safe to run
+/// against a live box: a rebuild writes a new generation directory and never
+/// touches the one this mount already opened.
 pub fn mount(sb: &Sandbox) -> Result<()> {
     if is_mounted(&sb.root()) {
         if !overlay_stale(&sb.name) {
             return Ok(());
         }
         // The box is idle here - a launch mounts before it boots - so the cure
-        // is free: drop the stale mount and build a new one over the image as
-        // it stands. The box's writes are in `upper` on disk, not in the mount.
+        // is free: drop the stale mount and build a new one over the current
+        // generation. The box's writes are in `upper` on disk, not in the mount.
         if service_active(&sb.name) {
             crate::warn(&format!(
-                "{name} is running on an overlay older than the base image, so \
-                 files the image has gained may be invisible inside it; \
+                "{name} is running on a base generation that no longer exists on \
+                 disk, so files it needs may be missing entirely; \
                  `agentbox down {name}` then `agentbox remount {name}` clears it",
                 name = sb.name
             ));
             return Ok(());
         }
         info(&format!(
-            "{} is on an overlay older than the base image; remounting",
+            "{}'s base generation no longer exists on disk; remounting",
             sb.name
         ));
         umount_root(&sb.root())?;
     }
     base::require()?;
+    let generation = base::current_id();
+    if let Some(expected) =
+        uid_base_mismatch(sb.cfg.uid_base, base::generation_uid_base(&generation))
+    {
+        bail!(
+            "box {} is configured with uid_base {}, but base generation {generation} was \
+             shifted for uid_base {expected}; set `uid_base = {expected}` in {PROJECT_FILE}, \
+             or `agentbox build --force` after changing the global uid_base back",
+            sb.name,
+            sb.cfg.uid_base,
+        );
+    }
     for dir in [sb.upper(), sb.work(), sb.root()] {
         sh(argv!["mkdir", "-p", dir]).quiet().run()?;
     }
     let options = format!(
         "lowerdir={base},upperdir={upper},workdir={work},\
          index=off,metacopy=off,redirect_dir=off,xino=off",
-        base = base::image().display(),
+        base = base::generation_dir(&generation).display(),
         upper = sb.upper().display(),
         work = sb.work().display(),
     );
@@ -81,12 +99,14 @@ pub fn mount(sb: &Sandbox) -> Result<()> {
         sb.root()
     ])
     .run()?;
-    // What this mount is a view of, so a later launch can tell that the image
-    // underneath it has moved on. The mkdir above made the box directory, and
-    // dry runs never mounted anything to record.
+    // Which generation this mount is a view of, so a later command can tell
+    // whether it's still on disk at all (`overlay_stale`) and whether it's the
+    // one a fresh mount would pick (`overlay_label`, for `agentbox ls`). The
+    // mkdir above made the box directory, and dry runs never mounted anything
+    // to record.
     if !dry_run() {
         let path = overlay_id_path(&sb.name);
-        fs::write(&path, format!("{}\n", base::id()))
+        fs::write(&path, format!("{generation}\n"))
             .with_context(|| format!("cannot write {}", path.display()))?;
     }
     Ok(())
@@ -96,14 +116,24 @@ pub fn umount(sb: &Sandbox) -> Result<()> {
     umount_root(&sb.root())
 }
 
-/// Unmount one box's overlay by path, for a caller that holds a name rather
-/// than a whole `Sandbox` - `base::build`, taking idle boxes off the image it
-/// is about to rewrite.
-pub fn umount_root(root: &Path) -> Result<()> {
+/// Unmount one box's overlay by path. Shared by `umount`'s public entry point
+/// and `mount`'s own straddled-a-rebuild repair, both of which already hold
+/// (or have just built) the root path rather than a bare box name.
+fn umount_root(root: &Path) -> Result<()> {
     if is_mounted(root) {
         sh(argv!["umount", root]).run()?;
     }
     Ok(())
+}
+
+/// Whether a box's configured `uid_base` is safe to mount against a
+/// generation shifted for `generation_uid_base` - `None` there means the
+/// generation predates this being recorded, so there is nothing to check and
+/// it is let through. Returns the generation's uid_base when it conflicts,
+/// for the error message. Pure, so the "unknown means allow, known-and-
+/// different means refuse" rule is covered without a real generation on disk.
+fn uid_base_mismatch(configured: u32, generation_uid_base: Option<u32>) -> Option<u32> {
+    generation_uid_base.filter(|&shifted| shifted != configured)
 }
 
 /// Every box on this host, sorted by name.
@@ -129,30 +159,73 @@ pub fn mounted_boxes() -> Vec<String> {
         .collect()
 }
 
-/// Which base image a box's overlay was mounted on, written when it is mounted.
+/// Which base generation a box's overlay was mounted on, written when it is
+/// mounted.
 fn overlay_id_path(name: &str) -> PathBuf {
     state_dir().join("boxes").join(name).join("overlay.id")
 }
 
-/// Whether a box is mounted on an image that has changed underneath it.
-///
-/// overlayfs never revalidates its lower layer, so a mount that outlived a
-/// `build` keeps serving the view it cached: a file the build added can be
-/// listed by `readdir` and still `ENOENT` on open, for the life of the mount.
-/// `build` now takes every box off the image before touching it, so a stale
-/// mount can only have been left by an older agentbox - which is exactly the
-/// mount that might be straddling a rebuild, so "no record at all" counts as
-/// stale rather than as nothing to worry about. Every mount this version makes
-/// writes a record, even an empty one for an image built before ids existed,
-/// so an unstamped image matches its own overlays instead of condemning them.
-pub fn overlay_stale(name: &str) -> bool {
-    if !is_mounted(&Path::new(MACHINES).join(name)) {
-        return false;
-    }
-    let recorded = fs::read_to_string(overlay_id_path(name))
+/// The generation id a box's overlay claims, if the record exists and is
+/// non-empty. Used by `base::gc_generations` to know what a *mounted* box
+/// pins, and by `overlay_stale`/`overlay_label` to tell "on an old generation"
+/// (fine) from "on no generation at all" (broken).
+pub fn overlay_generation(name: &str) -> Option<String> {
+    fs::read_to_string(overlay_id_path(name))
         .ok()
-        .map(|id| id.trim().to_string());
-    recorded != Some(base::id())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Pure core of `overlay_stale`: given whether a box is mounted and whether
+/// its recorded generation still exists on disk (`None` = no usable record at
+/// all), is the mount stale? Generations are never mutated in place and
+/// `gc_generations` never deletes one a mounted box still names, so "on an
+/// older-but-present generation" is the ordinary case here, not stale -
+/// unlike the single mutable base this replaced, where any mismatch meant the
+/// image had moved on underneath the mount.
+fn is_stale(mounted: bool, recorded_generation_exists: Option<bool>) -> bool {
+    mounted && recorded_generation_exists != Some(true)
+}
+
+/// Whether a box's overlay claims a generation that no longer exists on disk.
+///
+/// The only way this can be true is a generation gone missing out from under
+/// a still-mounted box: a GC race, or a mount left by a version of agentbox
+/// that predates generations and never wrote a matching record. Either way
+/// there is nothing left to serve reads from.
+pub fn overlay_stale(name: &str) -> bool {
+    let mounted = is_mounted(&Path::new(MACHINES).join(name));
+    let recorded_generation_exists =
+        overlay_generation(name).map(|id| base::generation_exists(&id));
+    is_stale(mounted, recorded_generation_exists)
+}
+
+/// Pure core of `overlay_label`: the `OVERLAY` column `agentbox ls` prints,
+/// given whether a box is mounted, whether it's stale, its recorded
+/// generation (if any) and the current one. A box can be mounted on an older
+/// generation than a fresh launch would pick without that being an error, so
+/// that case gets its own label rather than either "mounted" or "stale".
+fn overlay_label_from(mounted: bool, stale: bool, recorded: Option<&str>, current: &str) -> String {
+    if !mounted {
+        return "-".into();
+    }
+    if stale {
+        return "stale".into();
+    }
+    let recorded = recorded.unwrap_or_default();
+    if recorded == current {
+        "mounted".into()
+    } else {
+        format!("mounted ({recorded}, current {current})")
+    }
+}
+
+/// The `OVERLAY` column for one box in `agentbox ls`.
+pub fn overlay_label(name: &str) -> String {
+    let mounted = is_mounted(&Path::new(MACHINES).join(name));
+    let stale = overlay_stale(name);
+    let recorded = overlay_generation(name);
+    overlay_label_from(mounted, stale, recorded.as_deref(), &base::current_id())
 }
 
 /// Whether a box's container service is up, by name. `session::running`
@@ -1766,5 +1839,69 @@ mod tests {
         // What inside() would build for a `..` dst escapes and is rejected.
         assert!(!within_root(root, &root.join("../../../home/me/i_win")));
         assert!(!within_root(root, Path::new("/home/me/i_win")));
+    }
+
+    #[test]
+    fn an_unmounted_box_is_never_stale() {
+        assert!(!is_stale(false, None));
+        assert!(!is_stale(false, Some(false)));
+    }
+
+    #[test]
+    fn a_mounted_box_with_no_usable_record_is_stale() {
+        assert!(is_stale(true, None));
+    }
+
+    #[test]
+    fn a_mounted_box_whose_generation_vanished_is_stale() {
+        assert!(is_stale(true, Some(false)));
+    }
+
+    /// The whole point of generations: an old-but-still-present one is not an
+    /// error, unlike the single mutable base this replaced.
+    #[test]
+    fn a_mounted_box_on_an_existing_older_generation_is_not_stale() {
+        assert!(!is_stale(true, Some(true)));
+    }
+
+    #[test]
+    fn an_unrecorded_generation_is_let_through() {
+        assert_eq!(uid_base_mismatch(1_310_720_000, None), None);
+    }
+
+    #[test]
+    fn a_matching_uid_base_is_let_through() {
+        assert_eq!(uid_base_mismatch(1_310_720_000, Some(1_310_720_000)), None);
+    }
+
+    #[test]
+    fn a_mismatched_uid_base_is_refused_with_the_expected_value() {
+        assert_eq!(
+            uid_base_mismatch(1_310_720_000, Some(1_310_785_536)),
+            Some(1_310_785_536)
+        );
+    }
+
+    #[test]
+    fn an_unmounted_box_shows_a_dash_regardless_of_its_stale_record() {
+        assert_eq!(overlay_label_from(false, true, Some("g1"), "g2"), "-");
+    }
+
+    #[test]
+    fn a_stale_mount_is_labelled_stale_even_with_a_recorded_id() {
+        assert_eq!(overlay_label_from(true, true, Some("g1"), "g2"), "stale");
+    }
+
+    #[test]
+    fn a_mount_on_the_current_generation_is_just_mounted() {
+        assert_eq!(overlay_label_from(true, false, Some("g2"), "g2"), "mounted");
+    }
+
+    #[test]
+    fn a_mount_on_an_older_generation_names_both() {
+        assert_eq!(
+            overlay_label_from(true, false, Some("g1"), "g2"),
+            "mounted (g1, current g2)"
+        );
     }
 }

@@ -107,7 +107,7 @@ $ agentbox build
 
 One-time, a few minutes, and every project shares the result. The stages are:
 
-1. **Bootstrap** — `pacman --root /var/lib/agentbox/base -Sy base archlinux-keyring`,
+1. **Bootstrap** — `pacman --root /var/lib/agentbox/bases/<id> -Sy base archlinux-keyring`,
    using the host's package cache and keyring, with `/proc`, `/sys`, `/dev` and
    `/run` bind mounted so install scriptlets work. This is what
    `pacstrap` does; doing it inline avoids depending on `arch-install-scripts`.
@@ -126,28 +126,43 @@ One-time, a few minutes, and every project shares the result. The stages are:
 Useful variants:
 
 ```console
-$ agentbox build --refresh    # pacman -Syu the base image in place
-$ agentbox build --force      # delete and rebuild it from scratch
+$ agentbox build --refresh    # pacman -Syu a copy of the current image
+$ agentbox build --force      # bootstrap a brand new one from scratch
 ```
 
-Both rewrite the layer every box overlays, so both begin by taking the boxes
-off it. A *running* box — any of them, mounted or not — refuses the build by
-name; power it off with `agentbox down <box>`, or leave the `shell`/`run`
-sessions holding it. Once nothing is alive, every mounted box is unmounted for
-you, which costs nothing: their writes live in `upper` on disk, not in the
-mount, and the next launch remounts on demand.
+Neither one touches the image any running box already has mounted. The base
+lives as a sequence of *generations* under `/var/lib/agentbox/bases/<id>/`
+rather than one directory rewritten in place: `--refresh` copies the current
+generation forward and upgrades the copy, `--force` bootstraps a new
+generation unconditionally, and either way a `current` pointer only swaps
+once the new generation is completely built. A box's overlay keeps whatever
+generation it already had open as its lowerdir - overlayfs never revalidates
+that once mounted - so a build no longer has to refuse while a box is running,
+or unmount one that's merely idle, to stay safe: there is nothing left for it
+to touch that a live mount depends on.
 
-That is not caution for its own sake. overlayfs does not tolerate its lower
-layer changing underneath it: a box left mounted across a refresh goes on
-serving the view it cached, so a file the refresh adds can end up half-visible
-— listed by `ls` but `ENOENT` on open, which is
+That used to be the failure mode this guarded against: overlayfs does not
+tolerate its lower layer changing underneath a mount, so rewriting the shared
+image in place while a box was still on it could leave a file half-visible —
+listed by `ls` but `ENOENT` on open, which is
 [its own troubleshooting entry](troubleshooting.md#a-program-the-base-image-has-is-missing-inside-a-box).
+Writing every build to its own directory instead removes the failure mode
+rather than just guarding it.
 
-As a second line of defence, each build stamps the image with a new identity
-and every overlay records the one it was mounted on. A box whose image has
-moved on shows as `stale` in `agentbox ls`, a launch remounts it before booting,
-and `agentbox remount <box>` does it on demand — all of it lossless, since a
-box's writes are in `upper` on disk rather than in the mount.
+A generation only disappears once nothing references it any more — nothing is
+`current`, and no *mounted* box's overlay still names it — which agentbox
+sweeps for opportunistically (on `build`, `down`, `reset`, `rm`, `remount` and
+`ls`) rather than as a step you run yourself. A box on an older-but-present
+generation is not an error: `agentbox ls` shows it informationally
+(`mounted (g..., current g...)`). It stays there on purpose - `agentbox down`
+stops the box but never touches its overlay, so a plain relaunch (`shell`,
+`run`, `up`) reattaches to the exact mount it already had - until you move it
+yourself with `agentbox remount <box>` (needs the box stopped first) or
+`agentbox reset <box>` (which also clears its writes). `stale` in `agentbox ls`
+is reserved for a generation that's actually missing from disk, which *is*
+repaired automatically by the next launch, or on demand by
+`agentbox remount <box>`, since a box's writes live in `upper` on disk rather
+than in the mount either way.
 
 ## Adding a package to every box
 
@@ -156,11 +171,18 @@ the image:
 
 ```console
 $ agentbox ls                                  # who is on the image right now
-$ agentbox down <box>                          # for each one still running
 $ $EDITOR ~/.config/agentbox/config.toml       # base_packages = [...]
-$ agentbox build --refresh
-$ agentbox shell                               # remounts over the new image
+$ agentbox build --refresh                     # safe to run with boxes above still up
+$ agentbox down <box>                          # for each one you want on the new image
+$ agentbox remount <box>                       # picks up the generation build just made
+$ agentbox shell <box>
 ```
+
+A box left running keeps serving the generation it already had mounted - that
+is the whole point, not an oversight - so `remount` (or `reset`, which also
+clears its writes) is what actually moves it onto the new one; a plain
+relaunch of a box that was never stopped and remounted stays exactly where it
+was.
 
 Two things to know before editing that list:
 

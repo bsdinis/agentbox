@@ -31,15 +31,30 @@ overlayfs gives per-project writability at the price of the diff:
   size; a box that has installed a few packages costs tens of megabytes.
 * `agentbox reset` is `rm -rf upper` and a remount. Roughly a second, and it
   cannot touch your code, which is a bind mount rather than part of the image.
-* `agentbox build --refresh` updates the base under every box at once. It
-  refuses while any box is running and unmounts the rest first: overlayfs never
-  revalidates its lower layer, so a mount that straddles a rebuild goes on
-  serving the view it cached - a file the build added can be listed by
-  `readdir` and still `ENOENT` on open, for as long as that mount lives.
-* Because prevention alone leaves no way to recognise a box that got into that
-  state under an older version, each build stamps the image and each overlay
-  records the stamp it mounted on. That is what `stale` means in `agentbox ls`,
-  what a launch quietly repairs, and what `agentbox remount` repairs on demand.
+* The base lives as a sequence of *generations* under
+  `/var/lib/agentbox/bases/<id>/`, not one directory mutated in place, because
+  overlayfs never revalidates its lower layer: a mount that straddled a rebuild
+  would go on serving the view it cached - a file the rebuild added can be
+  listed by `readdir` and still `ENOENT` on open, for as long as that mount
+  lives. `agentbox build --refresh` copies the current generation forward and
+  runs `pacman -Syu` on the copy; `--force` (and the first build) bootstraps a
+  new generation from scratch. Either way it swaps a `current` pointer to the
+  new generation and never touches the directory any live box already opened
+  as its lowerdir, so a build no longer has to refuse or unmount anything
+  running.
+* A generation sticks around exactly as long as `current` names it, or some
+  *mounted* box's `overlay.id` does; `base::gc_generations` deletes anything
+  else, run opportunistically by `build`, `down`, `reset`, `rm`, `remount` and
+  `ls` rather than as a separate step a user has to remember. An idle box pins
+  nothing even if its own record names an old generation, since its next mount
+  always targets `current` anyway.
+* `agentbox ls`'s `stale` means a box's recorded generation is missing from
+  disk entirely - a GC race, or a mount left by a version of agentbox that
+  predates generations - not "a newer generation exists"; a box happily
+  running on an older-but-still-present generation is the ordinary case, shown
+  as `mounted (g..., current g...)`. Either way, a launch quietly repairs it and
+  `agentbox remount` repairs it on demand, by dropping the overlay and
+  mounting fresh against `current`.
 
 The mount is deliberately conservative: `index=off,metacopy=off,redirect_dir=off,xino=off`.
 Those features change how the upper layer refers to lower files and interact
@@ -64,7 +79,14 @@ three ways, and the choice matters a lot here:
 So `agentbox build` shifts the base image once, at the end of the build, and
 every box then starts with `PrivateUsersOwnership=off` and zero per-launch
 work. The consequence is that all boxes share one UID range (`uid_base`,
-default 1310720000). Each box is fully isolated from the *host*; boxes are not
+default 1310720000) - *per generation*: each build stamps the `uid_base` it
+shifted for beside its generation directory, and `nspawn::mount` refuses to
+mount a box against a generation shifted for a different one rather than let
+the mismatch through silently. That matters more once generations make
+rebuilding routine than it did with one base built once: editing the global
+`uid_base` and rebuilding produces a generation only boxes without a
+conflicting `uid_base` of their own can use. Each box is fully isolated from
+the *host*; boxes are not
 isolated from each other's UIDs. Since they cannot see each other's
 filesystems, that only matters if you also hand two boxes a common read-write
 directory, and it is the deliberate trade for instant startup. Give a box its
