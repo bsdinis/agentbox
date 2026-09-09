@@ -36,13 +36,13 @@ pass=0 fail=0
 ok()   { printf '\033[32mPASS\033[0m %s\n' "$1"; pass=$((pass+1)); }
 no()   { printf '\033[31mFAIL\033[0m %s\n' "$1"; fail=$((fail+1)); }
 check(){ if [[ "$2" == "$3" ]]; then ok "$1"; else no "$1 (got '$2', want '$3')"; fi; }
-box()  { "$AGENTBOX" run --dir "$PROJ" -- "$@"; }
+box()  { "$AGENTBOX" run "$PROJ" -- "$@"; }
 
 cleanup() {
   [[ -n "${KEEP:-}" ]] && return
-  "$AGENTBOX" down --dir "$LIMITS" >/dev/null 2>&1
-  "$AGENTBOX" rm --dir "$PROJ" -y >/dev/null 2>&1
-  "$AGENTBOX" rm --dir "$LIMITS" -y >/dev/null 2>&1
+  "$AGENTBOX" down "$LIMITS" >/dev/null 2>&1
+  "$AGENTBOX" rm "$PROJ" -y >/dev/null 2>&1
+  "$AGENTBOX" rm "$LIMITS" -y >/dev/null 2>&1
   rm -rf "$PROJ" "$REF" "$LIMITS"
   # The throwaway image is owned by the shifted container UIDs, so it needs root.
   [[ -n "$FAKE" ]] && sudo rm -rf "$FAKE"
@@ -95,10 +95,15 @@ TOML
 
 # ---------------------------------------------------------------- lifecycle
 echo '--- creating box ---'
-"$AGENTBOX" run --dir "$PROJ" -- true || { echo 'could not create box'; exit 1; }
-BOXNAME="$("$AGENTBOX" status --dir "$PROJ" | awk '/^box /{print $2}')"
-UIDBASE="$("$AGENTBOX" status --dir "$PROJ" | awk '/^uid range/{split($3,a,"[.][.]");print a[1]}')"
+"$AGENTBOX" run "$PROJ" -- true || { echo 'could not create box'; exit 1; }
+BOXNAME="$("$AGENTBOX" status "$PROJ" | awk '/^box /{print $2}')"
+UIDBASE="$("$AGENTBOX" status "$PROJ" | awk '/^uid range/{split($3,a,"[.][.]");print a[1]}')"
 printf 'box %s, uid base %s\n\n' "$BOXNAME" "$UIDBASE"
+
+# The same box, named rather than pointed at: `agentbox ls` prints these names,
+# and every management command takes one in place of the project directory.
+check 'a box can be named instead of its project directory' \
+  "$("$AGENTBOX" status "$BOXNAME" | awk '/^project /{print $2}')" "$PROJ"
 
 echo '--- identity and paths ---'
 check 'project mounted at its real host path' "$(box pwd)" "$PROJ"
@@ -114,7 +119,7 @@ check 'the package actually runs'  "$(box sh -c 'cowsay moo | grep -c moo')" 1
 check 'host is unaffected'         "$(command -v cowsay || echo none)" none
 # Without the preflight this is nspawn's `execv(...) failed`, printed after the
 # box is already up and with nothing to say the program was never installed.
-MISSING="$("$AGENTBOX" run --dir "$PROJ" -- agentbox-no-such-program 2>&1)"
+MISSING="$("$AGENTBOX" run "$PROJ" -- agentbox-no-such-program 2>&1)"
 check 'a payload missing from the box is named before launch' \
   "$(grep -c 'not found in box' <<< "$MISSING")" 1
 
@@ -169,8 +174,8 @@ check 'ro mount survived intact' "$(tail -c 9 "$REF/NOTES.md")" 'not edit'
 # with a mount of its own cannot be mapped at all, and must be refused before
 # anything is created rather than after the overlay is already mounted.
 UNSUP="$(mktemp -d /tmp/agentbox-unsupported-XXXXXX)"
-unsup_box="$("$AGENTBOX" status --dry-run --dir "$UNSUP" 2>/dev/null | awk '/^box /{print $2}')"
-unsup_out="$("$AGENTBOX" run --dir "$UNSUP" -- true 2>&1)"
+unsup_box="$("$AGENTBOX" status --dry-run "$UNSUP" 2>/dev/null | awk '/^box /{print $2}')"
+unsup_out="$("$AGENTBOX" run "$UNSUP" -- true 2>&1)"
 check 'a project under /tmp is refused' \
   "$(grep -c 'cannot be mapped into a box' <<< "$unsup_out")" 1
 check 'the refusal names the path nspawn owns' \
@@ -184,7 +189,7 @@ rm -rf "$UNSUP"
 echo
 echo '--- persistence and reset ---'
 check 'installed package persists across launches' "$(installed)" installed
-"$AGENTBOX" reset --dir "$PROJ" -y >/dev/null 2>&1
+"$AGENTBOX" reset "$PROJ" -y >/dev/null 2>&1
 check 'reset removed the package'  "$(installed)" gone
 check 'reset kept the code intact' "$(cat "$PROJ/file.txt" 2>/dev/null)" hello
 
@@ -195,9 +200,9 @@ memory_max = "2G"
 cpu_quota = "150%"
 tasks_max = "512"
 TOML
-lim() { "$AGENTBOX" run --dir "$LIMITS" -- "$@"; }
+lim() { "$AGENTBOX" run "$LIMITS" -- "$@"; }
 lim true >/dev/null 2>&1
-LBOX="$("$AGENTBOX" status --dir "$LIMITS" | awk '/^box /{print $2}')"
+LBOX="$("$AGENTBOX" status "$LIMITS" | awk '/^box /{print $2}')"
 
 # Read the caps from the host while a box is running, rather than from inside
 # it. nspawn delegates a subgroup to the container - the stock unit spells it
@@ -234,7 +239,7 @@ wait "$limpid" 2>/dev/null
 echo
 echo '--- 6. booted mode (systemd as PID 1 inside) ---'
 SERVICE="systemd-nspawn@$LBOX.service"
-"$AGENTBOX" up --dir "$LIMITS" >/dev/null 2>&1
+"$AGENTBOX" up "$LIMITS" >/dev/null 2>&1
 
 # `systemctl is-active` on the service says only that nspawn was started; the
 # box's own systemd may still be coming up, or may already have died. Waiting
@@ -261,7 +266,7 @@ check "the box's own systemd is up" \
 check 'registers with machined'  "$(machinectl list --no-legend 2>/dev/null | awk -v b="$LBOX" '$1==b{print "listed"}')" listed
 check 'the settings file applied to the booted box' \
   "$(sudo systemd-run -M "$LBOX" --pipe --quiet --wait /usr/bin/hostname 2>/dev/null)" "$LBOX"
-"$AGENTBOX" down --dir "$LIMITS" >/dev/null 2>&1
+"$AGENTBOX" down "$LIMITS" >/dev/null 2>&1
 for _ in $(seq 60); do
   settled "$SERVICE" && break
   sleep 0.5
@@ -273,10 +278,10 @@ echo '--- 7. network modes ---'
 check 'host networking reaches the network' \
   "$(box sh -c 'getent hosts archlinux.org >/dev/null 2>&1 && echo up || echo down')" up
 check 'network = none exposes only loopback' \
-  "$("$AGENTBOX" run --dir "$PROJ" --network none -- \
+  "$("$AGENTBOX" run "$PROJ" --network none -- \
      sh -c 'ls /sys/class/net | xargs echo' 2>/dev/null)" lo
 check 'network = none cannot resolve' \
-  "$("$AGENTBOX" run --dir "$PROJ" --network none -- \
+  "$("$AGENTBOX" run "$PROJ" --network none -- \
      sh -c 'getent hosts archlinux.org >/dev/null 2>&1 && echo up || echo down' 2>/dev/null)" down
 
 echo
@@ -314,7 +319,7 @@ echo '--- 9. AGENTBOX_STATE cannot aim a privileged agentbox ---'
 # unprivileged caller setting it must not move where boxes and the image live.
 FAKE="$(mktemp -d "$root/agentbox-fakestate-XXXXXX")"
 check 'the run still finds the real base image' \
-  "$(env AGENTBOX_STATE="$FAKE" "$AGENTBOX" run --dir "$PROJ" -- \
+  "$(env AGENTBOX_STATE="$FAKE" "$AGENTBOX" run "$PROJ" -- \
      sh -c 'echo real-image' 2>/dev/null)" real-image
 check 'nothing was created in the decoy state dir' \
   "$(find "$FAKE" -mindepth 1 2>/dev/null | wc -l)" 0
@@ -372,5 +377,5 @@ echo '--- 11. the host itself is unharmed ---'
 check 'host mounts under /dev and /run survived' "$(lost_mounts)" 'none lost'
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
-[[ -n "${KEEP:-}" ]] && printf 'kept: %s (agentbox rm --dir %s)\n' "$BOXNAME" "$PROJ"
+[[ -n "${KEEP:-}" ]] && printf 'kept: %s (agentbox rm %s)\n' "$BOXNAME" "$BOXNAME"
 exit $((fail > 0))

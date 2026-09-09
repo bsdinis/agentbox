@@ -344,6 +344,13 @@ $ agentbox rm         # delete the box entirely
 $ agentbox ls         # WRITES column shows what each box is costing you
 ```
 
+Those act on the box for the current directory. To clean up from anywhere, name
+the box `agentbox ls` printed:
+
+```console
+$ agentbox rm myproj-1a2b3c4 -y
+```
+
 `reset` is the one to reach for when an agent has mangled the box's `/etc` or
 installed something poisonous: it deletes the overlay and rebuilds the box from
 the shared base in about a second. Your project directory is a bind mount, so

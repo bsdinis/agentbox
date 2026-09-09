@@ -127,7 +127,7 @@ root-owned, so the rule grants only what `agentbox` itself can do.
 
 ```console
 $ agentbox ls                             # see what exists
-$ agentbox rm --dir <project>             # per box
+$ agentbox rm <box>                       # per box
 $ sudo rm -rf /var/lib/agentbox           # base image and all overlays
 $ sudo rm -f /etc/systemd/nspawn/*.nspawn # generated settings (check first)
 $ rm ~/.local/bin/agentbox

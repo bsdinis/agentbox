@@ -56,12 +56,13 @@ struct Cli {
     command: Command,
 }
 
-/// Which project a command applies to, and one-off mount overrides.
+/// Which box a command applies to, and one-off mount overrides.
 #[derive(Args, Default, Clone)]
 struct Target {
-    /// Project directory (default: the current directory)
-    #[arg(long, global = true)]
-    dir: Option<PathBuf>,
+    /// Box to act on, named as `agentbox ls` prints it, or the project
+    /// directory it was made for (default: the current directory's box)
+    #[arg(value_name = "BOX")]
+    r#box: Option<String>,
 
     /// Extra read-only mount, PATH or HOST:CONTAINER (repeatable)
     #[arg(long = "map", value_name = "PATH[:DEST]")]
@@ -109,8 +110,9 @@ enum Command {
     Init {
         #[arg(long)]
         force: bool,
-        #[command(flatten)]
-        target: Target,
+        /// Project directory (default: the current directory)
+        #[arg(value_name = "DIR")]
+        dir: Option<String>,
     },
 
     /// Create or attach to the box, then open a shell in it
@@ -177,7 +179,9 @@ struct RunArgs {
     target: Target,
 
     /// Command to run, after `--`. Defaults to a login shell.
-    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    // `last` keeps the payload behind the `--`, so the free argument in
+    // `agentbox run mybox -- cmd` is read as the box and not as the command.
+    #[arg(last = true, allow_hyphen_values = true)]
     cmd: Vec<String>,
 }
 
@@ -211,16 +215,16 @@ fn run() -> Result<()> {
 
     match &cli.command {
         Command::Build { refresh, force } => cmds::build(*refresh, *force),
-        Command::Init { force, target } => cmds::init(&target.dir, *force),
+        Command::Init { force, dir } => cmds::init(dir, *force),
         Command::Shell(args) | Command::Run(args) => {
-            cmds::shell(&args.target.dir, &args.overrides(), args.root, &args.cmd)
+            cmds::shell(&args.target.r#box, &args.overrides(), args.root, &args.cmd)
         }
-        Command::Up { target } => cmds::up(&target.dir, &target.overrides()),
-        Command::Down { target } => cmds::down(&target.dir, &target.overrides()),
+        Command::Up { target } => cmds::up(&target.r#box, &target.overrides()),
+        Command::Down { target } => cmds::down(&target.r#box, &target.overrides()),
         Command::Ls => cmds::list(),
-        Command::Status { target } => cmds::status(&target.dir, &target.overrides()),
-        Command::Config { target } => cmds::show_config(&target.dir, &target.overrides()),
-        Command::Reset { yes, target } => cmds::reset(&target.dir, &target.overrides(), *yes),
-        Command::Rm { yes, target } => cmds::remove(&target.dir, &target.overrides(), *yes),
+        Command::Status { target } => cmds::status(&target.r#box, &target.overrides()),
+        Command::Config { target } => cmds::show_config(&target.r#box, &target.overrides()),
+        Command::Reset { yes, target } => cmds::reset(&target.r#box, &target.overrides(), *yes),
+        Command::Rm { yes, target } => cmds::remove(&target.r#box, &target.overrides(), *yes),
     }
 }

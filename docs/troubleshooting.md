@@ -321,7 +321,7 @@ lost; the writes are in `upper` on disk.
 ```console
 $ agentbox ls                                    # WRITES column
 $ sudo du -sh /var/lib/agentbox/boxes/*/upper    # per box
-$ agentbox reset --dir <project>                 # back to the base image
+$ agentbox reset <box>                           # back to the base image
 ```
 
 Package caches inside the box are the usual culprit: `[box]$ sudo pacman -Scc`.

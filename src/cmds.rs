@@ -4,7 +4,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 
 use crate::argv;
 use crate::base;
@@ -14,12 +14,55 @@ use crate::nspawn;
 use crate::sandbox::Sandbox;
 use crate::session;
 
-/// Resolve the project directory a command applies to.
-pub fn project_dir(dir: &Option<PathBuf>) -> Result<PathBuf> {
-    let path = match dir {
-        Some(dir) => config::expand(&dir.to_string_lossy()),
-        None => host().cwd.clone(),
-    };
+/// What a `[BOX]` argument turned out to name.
+#[derive(Debug, PartialEq)]
+enum Target {
+    /// A box that exists, and the project directory it was made for.
+    Box { name: String, project: PathBuf },
+    /// A project directory - given as a path, or defaulted to the cwd.
+    Dir(PathBuf),
+}
+
+/// Which of the two readings a `[BOX]` argument takes.
+///
+/// A box name is a hostname label - `Sandbox::new` turns every character that
+/// is not alphanumeric into `-` - so a spec containing a `/` can only be a
+/// path, and is never looked up as a box. Otherwise an existing box wins over a
+/// directory of the same name, since the argument is documented as a box and
+/// the name most likely came straight off `agentbox ls`.
+///
+/// The two lookups are passed in so the rule can be tested without a state
+/// directory: `boxes` maps a box name to the project it was made for, `dirs` a
+/// spec to the directory it names, if that directory exists.
+fn classify(
+    spec: &str,
+    boxes: impl Fn(&str) -> Option<PathBuf>,
+    dirs: impl Fn(&str) -> Option<PathBuf>,
+) -> Option<Target> {
+    if !spec.contains('/') {
+        if let Some(project) = boxes(spec) {
+            return Some(Target::Box {
+                name: spec.to_string(),
+                project,
+            });
+        }
+    }
+    dirs(spec).map(Target::Dir)
+}
+
+/// The project directory a box was created for, as recorded when it was made.
+fn box_project(name: &str) -> Option<PathBuf> {
+    let meta = nspawn::state_dir()
+        .join("boxes")
+        .join(name)
+        .join("meta.json");
+    let text = fs::read_to_string(meta).ok()?;
+    let meta: serde_json::Value = serde_json::from_str(&text).ok()?;
+    Some(PathBuf::from(meta.get("project")?.as_str()?))
+}
+
+/// Canonicalize a directory a command was pointed at, and refuse a non-directory.
+fn project_dir(path: PathBuf) -> Result<PathBuf> {
     let path = path.canonicalize().unwrap_or(path);
     if !path.is_dir() {
         bail!("{} is not a directory", path.display());
@@ -27,10 +70,49 @@ pub fn project_dir(dir: &Option<PathBuf>) -> Result<PathBuf> {
     Ok(path)
 }
 
-pub fn load(dir: &Option<PathBuf>, overrides: &Overrides) -> Result<Sandbox> {
-    let project = project_dir(dir)?;
+/// Resolve what a command acts on. No argument means the current directory.
+///
+/// A named box is taken at its word: its recorded project directory is used as
+/// it stands, without the `project_dir` check, so a box whose project has since
+/// been deleted can still be listed, powered off and removed.
+fn resolve(spec: &Option<String>) -> Result<Target> {
+    let Some(spec) = spec else {
+        return Ok(Target::Dir(project_dir(host().cwd.clone())?));
+    };
+    let dirs = |spec: &str| {
+        let path = config::expand(spec);
+        path.is_dir().then(|| path.canonicalize().unwrap_or(path))
+    };
+    classify(spec, box_project, dirs).ok_or_else(|| {
+        anyhow!(
+            "no box named {spec:?}, and {} is not a directory - `agentbox ls` \
+             lists the boxes",
+            config::expand(spec).display()
+        )
+    })
+}
+
+pub fn load(spec: &Option<String>, overrides: &Overrides) -> Result<Sandbox> {
+    let (project, named) = match resolve(spec)? {
+        Target::Box { name, project } => (project, Some(name)),
+        Target::Dir(project) => (project, None),
+    };
     let cfg = config::load(&project, overrides)?;
-    Ok(Sandbox::new(project, cfg))
+    let sb = Sandbox::new(project, cfg);
+    // The name is derived from the project path and `name` in the project file,
+    // so a box named on the command line can resolve to a *different* box if
+    // that file has been edited since. Say so rather than act on the wrong box.
+    if let Some(named) = named.filter(|named| *named != sb.name) {
+        bail!(
+            "box {named} was created for {}, which now configures itself as box \
+             {} - `name` in {PROJECT_FILE} has changed since. Act on {} by name, \
+             or put the old name back.",
+            sb.project.display(),
+            sb.name,
+            sb.name
+        );
+    }
+    Ok(sb)
 }
 
 // --------------------------------------------------------------------------
@@ -39,8 +121,11 @@ pub fn build(refresh: bool, force: bool) -> Result<()> {
     base::build(refresh, force)
 }
 
-pub fn init(dir: &Option<PathBuf>, force: bool) -> Result<()> {
-    let project = project_dir(dir)?;
+pub fn init(dir: &Option<String>, force: bool) -> Result<()> {
+    let project = project_dir(match dir {
+        Some(dir) => config::expand(dir),
+        None => host().cwd.clone(),
+    })?;
     let dest = project.join(PROJECT_FILE);
     if dest.exists() && !force {
         bail!(
@@ -185,12 +270,18 @@ fn git_hooks_ro(project: &Path, home: &Path, hooks_exists: bool) -> Option<Strin
 /// another `shell`/`run` can attach to the same running box), and powers off
 /// with the last session unless `up` marked it kept - see `session`.
 pub fn shell(
-    dir: &Option<PathBuf>,
+    spec: &Option<String>,
     overrides: &Overrides,
     as_root: bool,
     cmd: &[String],
 ) -> Result<()> {
-    let sb = load(dir, overrides)?;
+    // `agentbox run cmd` used to run `cmd`, and now reads it as the box to act
+    // on. Nothing else in the CLI would explain the "no box named cmd" that
+    // comes back, so add the missing half here.
+    let sb = load(spec, overrides).map_err(|err| match (spec, cmd.is_empty()) {
+        (Some(_), true) => anyhow!("{err:#}; a command to run goes after `--`"),
+        _ => err,
+    })?;
     let fresh = nspawn::create(&sb)?;
     let argv: Vec<OsString> = if cmd.is_empty() {
         argv![sb.shell(), "-l"]
@@ -227,8 +318,8 @@ pub fn shell(
     }
 }
 
-pub fn up(dir: &Option<PathBuf>, overrides: &Overrides) -> Result<()> {
-    let sb = load(dir, overrides)?;
+pub fn up(spec: &Option<String>, overrides: &Overrides) -> Result<()> {
+    let sb = load(spec, overrides)?;
     let fresh = nspawn::create(&sb)?;
     session::ensure_up(&sb)?;
     // A fresh box installs its configured packages here, after boot, so the
@@ -238,17 +329,13 @@ pub fn up(dir: &Option<PathBuf>, overrides: &Overrides) -> Result<()> {
     nspawn::canary(&sb, &sb.user.name)?;
     nspawn::install_packages(&sb, fresh)?;
     if !dry_run() {
-        println!(
-            "booted {}; open a shell with: agentbox shell --dir {}",
-            sb.name,
-            sb.project.display()
-        );
+        println!("booted {0}; open a shell with: agentbox shell {0}", sb.name);
     }
     Ok(())
 }
 
-pub fn down(dir: &Option<PathBuf>, overrides: &Overrides) -> Result<()> {
-    let sb = load(dir, overrides)?;
+pub fn down(spec: &Option<String>, overrides: &Overrides) -> Result<()> {
+    let sb = load(spec, overrides)?;
     session::down(&sb)
 }
 
@@ -273,14 +360,8 @@ pub fn list() -> Result<()> {
     ]];
     for name in &names {
         let dir = boxes.join(name);
-        let project = fs::read_to_string(dir.join("meta.json"))
-            .ok()
-            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-            .and_then(|meta| {
-                meta.get("project")
-                    .and_then(|p| p.as_str())
-                    .map(String::from)
-            })
+        let project = box_project(name)
+            .map(|p| p.display().to_string())
             .unwrap_or_else(|| "?".into());
         let overlay = if nspawn::is_mounted(&Path::new(crate::sandbox::MACHINES).join(name)) {
             "mounted"
@@ -323,8 +404,8 @@ pub fn list() -> Result<()> {
     Ok(())
 }
 
-pub fn status(dir: &Option<PathBuf>, overrides: &Overrides) -> Result<()> {
-    let sb = load(dir, overrides)?;
+pub fn status(spec: &Option<String>, overrides: &Overrides) -> Result<()> {
+    let sb = load(spec, overrides)?;
     let (lo, hi) = sb.uid_range();
     let mounted = if nspawn::is_mounted(&sb.root()) {
         "mounted"
@@ -360,8 +441,8 @@ pub fn status(dir: &Option<PathBuf>, overrides: &Overrides) -> Result<()> {
     Ok(())
 }
 
-pub fn show_config(dir: &Option<PathBuf>, overrides: &Overrides) -> Result<()> {
-    let sb = load(dir, overrides)?;
+pub fn show_config(spec: &Option<String>, overrides: &Overrides) -> Result<()> {
+    let sb = load(spec, overrides)?;
     print!("{}", effective_toml(&sb));
     println!("--- {} ---", sb.settings().display());
     print!("{}", nspawn::settings_text(&sb)?);
@@ -432,8 +513,8 @@ fn effective_toml(sb: &Sandbox) -> String {
     out
 }
 
-pub fn reset(dir: &Option<PathBuf>, overrides: &Overrides, yes: bool) -> Result<()> {
-    let sb = load(dir, overrides)?;
+pub fn reset(spec: &Option<String>, overrides: &Overrides, yes: bool) -> Result<()> {
+    let sb = load(spec, overrides)?;
     if !sb.dir().exists() {
         bail!("no box for {}", sb.project.display());
     }
@@ -451,8 +532,8 @@ pub fn reset(dir: &Option<PathBuf>, overrides: &Overrides, yes: bool) -> Result<
     Ok(())
 }
 
-pub fn remove(dir: &Option<PathBuf>, overrides: &Overrides, yes: bool) -> Result<()> {
-    let sb = load(dir, overrides)?;
+pub fn remove(spec: &Option<String>, overrides: &Overrides, yes: bool) -> Result<()> {
+    let sb = load(spec, overrides)?;
     if !sb.dir().exists() {
         bail!("no box for {}", sb.project.display());
     }
@@ -501,6 +582,45 @@ fn confirm(prompt: &str) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A state directory holding one box, `proj-abc1234`, made for `/w/proj`,
+    /// and a working directory holding a `proj-abc1234` of its own.
+    fn boxes(name: &str) -> Option<PathBuf> {
+        (name == "proj-abc1234").then(|| PathBuf::from("/w/proj"))
+    }
+    fn dirs(spec: &str) -> Option<PathBuf> {
+        ["proj-abc1234", "./proj-abc1234", "/w/proj"]
+            .contains(&spec)
+            .then(|| PathBuf::from("/cwd").join(spec))
+    }
+
+    #[test]
+    fn a_box_wins_over_a_directory_of_the_same_name() {
+        assert_eq!(
+            classify("proj-abc1234", boxes, dirs),
+            Some(Target::Box {
+                name: "proj-abc1234".into(),
+                project: "/w/proj".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn a_spec_with_a_separator_is_only_ever_a_path() {
+        assert_eq!(
+            classify("./proj-abc1234", boxes, dirs),
+            Some(Target::Dir("/cwd/./proj-abc1234".into()))
+        );
+        assert_eq!(
+            classify("/w/proj", boxes, dirs),
+            Some(Target::Dir("/w/proj".into()))
+        );
+    }
+
+    #[test]
+    fn a_name_that_is_neither_a_box_nor_a_directory_does_not_resolve() {
+        assert_eq!(classify("proj", boxes, dirs), None);
+    }
 
     #[test]
     fn git_project_under_home_yields_a_tildified_hooks_entry() {

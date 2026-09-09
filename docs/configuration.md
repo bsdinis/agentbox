@@ -173,11 +173,35 @@ $ agentbox --dry-run shell
 `agentbox config` and `agentbox init` are the only commands that do not need
 root, so they never prompt for a password.
 
+## Which box a command acts on
+
+Every command but `build`, `ls` and `init` takes an optional box, and falls
+back to the box for the current directory when none is given:
+
+```console
+$ agentbox status                    # the box for the current directory
+$ agentbox status myproj-1a2b3c4     # a box by name, as `agentbox ls` prints it
+$ agentbox status ~/dev/myproj       # the box for another project directory
+```
+
+A box name is a hostname label - every character that is not alphanumeric
+becomes a `-` - so an argument containing a `/` can only be a path, and is never
+looked up as a box. A bare name that is both an existing box and a directory in
+the current directory is read as the box.
+
+A named box is found through its own metadata rather than through the project
+file, so `down`, `reset` and `rm` keep working after the project directory has
+been moved or deleted. If the project file's `name` has changed since the
+box was made, the old name no longer resolves to it, and agentbox says so rather
+than acting on a different box.
+
+`init` is the exception: it writes a file into a directory, so its optional
+argument is a directory and is never read as a box name.
+
 ## CLI flags
 
 | Flag | Applies to | Effect |
 | --- | --- | --- |
-| `--dir PATH` | all but `build`, `ls` | Act on another project directory. |
 | `--map PATH[:DEST]` | `shell`, `run`, `up`, `status`, `config` | Extra read-only mount. Repeatable. |
 | `--rw-map PATH[:DEST]` | same | Extra read-write mount. Repeatable. |
 | `--network MODE` | same | Override network mode for this launch. |

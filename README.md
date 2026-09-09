@@ -78,21 +78,22 @@ why it is opt-in; the real base image is never touched.
 
 ```
 agentbox build [--refresh|--force]   build or update the shared base image
-agentbox init [--force]              write .agentbox.toml for this project
-agentbox shell [-- CMD ...]          boot or attach to the box, open a shell
-agentbox run -- CMD ...               boot or attach to the box, run one command
-agentbox up | down                   boot a box and keep it up | power it off
+agentbox init [DIR] [--force]        write .agentbox.toml for this project
+agentbox shell [BOX] [-- CMD ...]    boot or attach to the box, open a shell
+agentbox run [BOX] -- CMD ...        boot or attach to the box, run one command
+agentbox up | down [BOX]             boot a box and keep it up | power it off
 agentbox ls                          list boxes, overlay state, bytes written
-agentbox status                      show the box and mount plan for this project
-agentbox config                      show the effective config and .nspawn file
-agentbox reset [-y]                  discard everything the container wrote
-agentbox rm [-y]                     delete the box
+agentbox status [BOX]                show the box and mount plan for this project
+agentbox config [BOX]                show the effective config and .nspawn file
+agentbox reset [BOX] [-y]            discard everything the container wrote
+agentbox rm [BOX] [-y]               delete the box
 ```
 
-Every command except `build`, `ls` and `init` accepts `--dir PATH` to act on a
-project other than the current directory, plus `--map`, `--rw-map`,
-`--network`, `--ssh-key` as one-off overrides. `--dry-run` prints the exact
-commands and generated settings without changing anything.
+Every command except `build`, `ls` and `init` takes an optional box to act on:
+a name as `agentbox ls` prints it, or the project directory it was made for.
+With no box named, they act on the box for the current directory. `--map`,
+`--rw-map`, `--network` and `--ssh-key` are one-off overrides, and `--dry-run`
+prints the exact commands and generated settings without changing anything.
 
 ## Layout
 
