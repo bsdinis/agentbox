@@ -366,6 +366,12 @@ pub fn check_supported(sb: &Sandbox) -> Result<()> {
 /// `owneridmap` maps the host owner of the source onto *the owner of the
 /// destination inside the container*, so the mount point has to exist first,
 /// owned by the right container user.
+///
+/// Only for destinations at the top level of the box's filesystem. A
+/// destination nested inside another bind is prepared here too, but that inode
+/// is then hidden by the parent mount and never used: the mount point nspawn
+/// actually lands on is the one inside the parent's *source*, which nspawn
+/// creates itself if it is missing. The stray inode is left in the overlay.
 fn prepare_mount_point(sb: &Sandbox, bind: &Bind) -> Result<()> {
     debug_assert!(
         shadowed_by_nspawn(&bind.dst).is_none(),

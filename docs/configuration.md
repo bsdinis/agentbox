@@ -72,6 +72,47 @@ under a `[defaults]` table; both work, and `[defaults]` is clearer.
   If you list it again explicitly the first entry wins.
 * Nonexistent sources are skipped with a warning.
 
+### Nesting: one mount inside another
+
+Mapping a directory and something below it is supported, and **the inner one
+wins** — in both directions. `agentbox status` lists mounts in the order
+agentbox generates them (project, then `rw`, then `ro`), which is *not* the
+order they are applied: systemd-nspawn sorts its custom mounts by destination
+path before mounting any of them, so a parent is always mounted, made
+read-only and ID-mapped before its children are laid on top. Order within
+`.agentbox.toml` therefore does not matter.
+
+```toml
+# a read-only reference tree with one writable scratch area inside it
+ro = ["~/dev/reference"]
+rw = ["~/dev/reference/scratch"]
+
+# a writable state directory with one file held read-only inside it
+rw = ["~/.claude"]
+ro = ["~/.claude/.credentials.json"]
+```
+
+Three consequences worth knowing:
+
+* **A missing inner mount point is created, and where it is created differs.**
+  nspawn creates a destination that does not exist. Inside a read-write parent
+  that write goes through the bind to the **host** directory, so a typo leaves a
+  real empty directory or file in your home. Inside a read-only parent it cannot
+  be created at all and the launch fails — so an inner mount under a `ro` parent
+  only works if the path already exists in the parent's source.
+* **A read-only *file* inside a read-write parent is protected oddly.** It
+  cannot be written in place, but it also cannot be renamed over or deleted:
+  those fail with `EBUSY` rather than `EROFS`, because the destination is a
+  mount point. A program that saves by writing a temporary file and renaming it
+  will fail in a way that does not look like a permissions problem.
+* **Nesting is not deduplication.** Entries are deduplicated only on an exact
+  destination match, first one wins, and `rw` is processed before `ro`. So the
+  *same* path in both lists resolves to read-write, and the project directory —
+  claimed before either list — can never be made read-only as a whole. Making a
+  subdirectory of the project read-only does work, since that is nesting:
+  `ro = ["~/dev/api/vendor"]`.
+
+
 ## Project file example
 
 ```toml

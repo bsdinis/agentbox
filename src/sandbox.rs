@@ -130,6 +130,13 @@ impl Sandbox {
     /// The project directory is always read-write; everything else is opt-in.
     /// Sources that do not exist are skipped with a warning rather than
     /// failing, so a config can name optional dotfiles.
+    ///
+    /// The order here - project, then rw, then ro - decides only which entry
+    /// wins a *duplicate destination*, since `claimed` matches exact paths and
+    /// keeps the first. It does not decide which mount ends up on top: nspawn
+    /// sorts its custom mounts by destination before mounting any of them, so a
+    /// nested pair is always applied parent first, whatever order it is written
+    /// in. See docs/configuration.md, "Nesting: one mount inside another".
     pub fn binds(&self) -> Vec<Bind> {
         let mut binds = vec![Bind {
             read_only: false,

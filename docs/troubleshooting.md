@@ -62,6 +62,25 @@ The dependencies are `clap`, `serde`, `toml`, `serde_json`, `sha2`, `libc` and
 `anyhow`, all from crates.io. If you are offline and have them vendored,
 `cargo build --release --offline` works.
 
+## A mapped subdirectory will not mount, or a saved file fails with `EBUSY`
+
+Both come from nesting one mount inside another; see
+[configuration.md](configuration.md#nesting-one-mount-inside-another) for the
+rules. Two shapes cause almost all of it:
+
+* An `rw` map inside a `ro` parent whose path does not already exist in the
+  parent's source. nspawn creates a missing destination, but by then the parent
+  is already read-only, so the launch fails. Create the directory on the host
+  first.
+* A `ro` map of a single **file** inside an `rw` parent. The file is a mount
+  point, so it cannot be renamed over or unlinked — `EBUSY`, not `EROFS`. Any
+  program that saves by writing a temporary file and renaming it over the
+  original will fail. Map the file's directory read-only instead, or do not map
+  the file at all.
+
+`agentbox status` lists mounts in the order agentbox generates them, which is
+not the order nspawn applies them — it sorts by destination, parents first.
+
 ## `Failed to create ID-mapped mount` / mounts show up as `nobody`
 
 The `owneridmap` bind option needs ID-mapped mount support in the *source*
