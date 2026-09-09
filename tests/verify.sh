@@ -29,6 +29,7 @@ mkdir -p "$root" || { echo "cannot create $root" >&2; exit 1; }
 PROJ="$(mktemp -d "$root/agentbox-verify-XXXXXX")"
 REF="$(mktemp -d "$root/agentbox-refonly-XXXXXX")"
 LIMITS="$(mktemp -d "$root/agentbox-limits-XXXXXX")"
+NAT="$(mktemp -d "$root/agentbox-nat-XXXXXX")"
 BSTATE=""
 FAKE=""
 pass=0 fail=0
@@ -43,7 +44,8 @@ cleanup() {
   "$AGENTBOX" down "$LIMITS" >/dev/null 2>&1
   "$AGENTBOX" rm "$PROJ" -y >/dev/null 2>&1
   "$AGENTBOX" rm "$LIMITS" -y >/dev/null 2>&1
-  rm -rf "$PROJ" "$REF" "$LIMITS"
+  "$AGENTBOX" rm "$NAT" -y >/dev/null 2>&1
+  rm -rf "$PROJ" "$REF" "$LIMITS" "$NAT"
   # The throwaway image is owned by the shifted container UIDs, so it needs root.
   [[ -n "$FAKE" ]] && sudo rm -rf "$FAKE"
   [[ -n "$BSTATE" ]] && sudo rm -rf "$BSTATE"
@@ -308,6 +310,26 @@ check 'network = none exposes only loopback' \
 check 'network = none cannot resolve' \
   "$("$AGENTBOX" run "$PROJ" --network none -- \
      sh -c 'getent hosts archlinux.org >/dev/null 2>&1 && echo up || echo down' 2>/dev/null)" down
+
+# nat gives the box its own network namespace; it must still reach the internet
+# through the host's NAT (resolve a name and open an outbound connection), and a
+# fresh box's `packages` must install after boot - the point at which that
+# network is up. `bash`'s /dev/tcp needs no extra tool in the image.
+check 'network = nat resolves a name' \
+  "$("$AGENTBOX" run "$PROJ" --network nat -- \
+     sh -c 'getent hosts archlinux.org >/dev/null 2>&1 && echo up || echo down' 2>/dev/null)" up
+check 'network = nat opens an outbound connection' \
+  "$("$AGENTBOX" run "$PROJ" --network nat -- \
+     bash -c 'exec 3<>/dev/tcp/archlinux.org/443 && echo ok || echo fail' 2>/dev/null)" ok
+
+cat > "$NAT/.agentbox.toml" <<TOML
+network = "nat"
+packages = ["cowsay"]
+TOML
+"$AGENTBOX" run "$NAT" -- true >/dev/null 2>&1
+check 'a fresh nat box installs its packages after boot' \
+  "$("$AGENTBOX" run "$NAT" -- \
+     sh -c 'command -v cowsay >/dev/null && echo installed || echo gone' 2>/dev/null)" installed
 
 echo
 echo '--- 8. privilege handover hygiene ---'
