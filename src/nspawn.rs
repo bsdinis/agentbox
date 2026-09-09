@@ -390,6 +390,65 @@ pub fn shadowed_by_nspawn(dst: &Path) -> Option<&'static str> {
     NSPAWN_OWNED.into_iter().find(|base| dst.starts_with(base))
 }
 
+/// Why a bind destination is unsafe to place inside the box, or `None` if it
+/// is safe. `Sandbox::inside` builds the on-host target as
+/// `root().join(dst.strip_prefix("/"))` with no normalization, so a `dst`
+/// that is not absolute, or that carries `..`/`.` components, would let the
+/// join escape the box rootfs - and since the mount point is *created and
+/// chowned as root on the host* before nspawn ever starts, an escaping `dst`
+/// (e.g. `/../../../home/me/i_win`) turns into an arbitrary host path owned by
+/// root. Require an absolute, lexically normalized path so that join can only
+/// ever land under `root()`.
+fn unsafe_dst(dst: &Path) -> Option<String> {
+    use std::path::Component;
+    if !dst.is_absolute() {
+        return Some(format!("{} is not absolute", dst.display()));
+    }
+    for comp in dst.components() {
+        match comp {
+            Component::RootDir | Component::Normal(_) => {}
+            Component::ParentDir => {
+                return Some(format!("{} contains a `..` component", dst.display()));
+            }
+            Component::CurDir => {
+                return Some(format!("{} contains a `.` component", dst.display()));
+            }
+            Component::Prefix(_) => {
+                return Some(format!("{} contains a path prefix", dst.display()));
+            }
+        }
+    }
+    None
+}
+
+/// Lexical containment, checked without touching the filesystem: does
+/// `target`, once its `.`/`..` components are resolved, stay within `root`?
+/// A defense-in-depth guard for the privileged create/chown in
+/// [`prepare_mount_point`], independent of the up-front [`unsafe_dst`] gate.
+/// A `..` that would climb above the path's own root makes it return `false`.
+fn within_root(root: &Path, target: &Path) -> bool {
+    use std::path::Component;
+    fn normalize(p: &Path) -> Option<PathBuf> {
+        let mut out = PathBuf::new();
+        for comp in p.components() {
+            match comp {
+                Component::ParentDir => {
+                    if !out.pop() {
+                        return None;
+                    }
+                }
+                Component::CurDir => {}
+                other => out.push(other.as_os_str()),
+            }
+        }
+        Some(out)
+    }
+    match (normalize(root), normalize(target)) {
+        (Some(r), Some(t)) => t.starts_with(&r),
+        _ => false,
+    }
+}
+
 /// Every bind nspawn would shadow, paired with the path it owns. Empty means
 /// the mount plan is launchable.
 pub fn unsupported_binds(sb: &Sandbox) -> Vec<(Bind, &'static str)> {
@@ -406,6 +465,15 @@ pub fn unsupported_binds(sb: &Sandbox) -> Vec<(Bind, &'static str)> {
 /// so that `status` and `--dry-run` can report the same thing without creating
 /// anything at all.
 pub fn check_supported(sb: &Sandbox) -> Result<()> {
+    // Reject a destination that could escape the box rootfs before anything is
+    // created or chowned. `inside()` does not normalize, so an un-normalized
+    // `dst` from a `.agentbox.toml` would otherwise steer the privileged
+    // create/chown at an arbitrary host path.
+    for bind in sb.binds() {
+        if let Some(reason) = unsafe_dst(&bind.dst) {
+            bail!("refusing an unsafe bind destination: {reason}");
+        }
+    }
     let unsupported = unsupported_binds(sb);
     if unsupported.is_empty() {
         return Ok(());
@@ -455,6 +523,16 @@ fn prepare_mount_point(sb: &Sandbox, bind: &Bind) -> Result<()> {
         "check_supported was skipped"
     );
     let target = sb.inside(&bind.dst);
+    // Belt and suspenders: even though check_supported already rejected an
+    // unsafe dst, never create or chown a path that lands outside the rootfs.
+    let root = sb.root();
+    if !within_root(&root, &target) {
+        bail!(
+            "refusing to prepare mount point {} outside the box rootfs {}",
+            target.display(),
+            root.display()
+        );
+    }
     let meta =
         fs::metadata(&bind.src).with_context(|| format!("cannot stat {}", bind.src.display()))?;
     if let Some(parent) = target.parent() {
@@ -901,5 +979,40 @@ mod tests {
         assert!(reject_control_chars("an environment variable name", "KEY\n[Files]").is_err());
         // An ordinary value is accepted.
         assert!(reject_control_chars("an environment variable value", "some/value:with-colon").is_ok());
+    }
+
+    /// The A4 vector: an un-normalized `dst` with `..` would let `inside()`
+    /// climb out of the rootfs, so `check_supported` refuses it up front (it
+    /// bails on any `dst` for which `unsafe_dst` returns a reason).
+    #[test]
+    fn a_traversing_destination_is_refused() {
+        assert!(unsafe_dst(Path::new("/../../../home/me/i_win")).is_some());
+        assert!(unsafe_dst(Path::new("/srv/../etc/shadow")).is_some());
+        // A relative destination cannot be joined safely either.
+        assert!(unsafe_dst(Path::new("home/me/i_win")).is_some());
+    }
+
+    /// An ordinary absolute, normalized destination is accepted.
+    #[test]
+    fn a_normal_nested_destination_is_accepted() {
+        assert_eq!(unsafe_dst(Path::new("/home/me/project")), None);
+        assert_eq!(unsafe_dst(Path::new("/srv/work")), None);
+        assert_eq!(unsafe_dst(Path::new("/")), None);
+    }
+
+    /// The defense-in-depth containment guard used before the privileged
+    /// create/chown: an escaping target is rejected, a legit one accepted.
+    #[test]
+    fn containment_guard_keeps_targets_under_root() {
+        let root = Path::new("/var/lib/machines/box");
+        // What inside() would build for a legit dst stays under root.
+        assert!(within_root(root, &root.join("home/me/project")));
+        assert!(within_root(root, root));
+        // What inside() would build for a `..` dst escapes and is rejected.
+        assert!(!within_root(
+            root,
+            &root.join("../../../home/me/i_win")
+        ));
+        assert!(!within_root(root, Path::new("/home/me/i_win")));
     }
 }

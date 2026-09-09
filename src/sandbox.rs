@@ -123,7 +123,19 @@ impl Sandbox {
     }
 
     /// A path inside the container, as seen from the host.
+    ///
+    /// The join is not normalized, so a `path` carrying `..` components would
+    /// escape `root()`. Callers must only pass fixed internal paths or a bind
+    /// destination already validated by `nspawn::check_supported`; this assert
+    /// catches a regression that routed an un-normalized path here.
     pub fn inside(&self, path: &Path) -> PathBuf {
+        debug_assert!(
+            !path
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir)),
+            "inside() called with a `..` path ({}); it would escape the box rootfs",
+            path.display()
+        );
         self.root().join(path.strip_prefix("/").unwrap_or(path))
     }
 
