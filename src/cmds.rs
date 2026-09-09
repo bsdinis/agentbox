@@ -49,6 +49,27 @@ pub fn init(dir: &Option<PathBuf>, force: bool) -> Result<()> {
         );
     }
     let name = project.file_name().unwrap_or_default().to_string_lossy();
+    // Compute the read-only `.git/hooks` block once, so the dry-run print and
+    // the real write below stay identical.
+    let hooks_ro = git_hooks_ro(
+        &project,
+        &host().user.home,
+        project.join(".git/hooks").is_dir(),
+    );
+    let ro_block = match &hooks_ro {
+        Some(entry) => format!(
+            "# read-only mounts: reference code, path dependencies, registries, dotfiles.\n\
+             # `.git/hooks` is mapped read-only so an agent in the box cannot plant a\n\
+             # hook that would then run on the host, as you, the next time you\n\
+             # git commit / checkout / merge / push here; leave it in place. See\n\
+             # docs/security.md.\n\
+             ro = [{entry:?}]"
+        ),
+        None => {
+            "# read-only mounts: reference code, path dependencies, registries, dotfiles\nro = []"
+                .to_string()
+        }
+    };
     let template = format!(
         r#"# agentbox sandbox for {name}
 # The project directory itself is always mounted read-write at its real path.
@@ -71,8 +92,7 @@ packages = []
 # read-write mounts (host path, or "host:container" path pair)
 rw = []
 
-# read-only mounts: reference code, path dependencies, registries, dotfiles
-ro = []
+{ro_block}
 
 # extra environment variables forwarded from the host, if set
 # pass_env = ["ANTHROPIC_API_KEY"]
@@ -134,6 +154,30 @@ fn warn_if_unmappable(project: &Path) {
             project.display()
         ));
     }
+}
+
+/// The read-only `.git/hooks` entry `init` bakes into a git project's config,
+/// or `None` when the project is not a (normal) git repository.
+///
+/// `hooks_exists` is whether `<project>/.git/hooks` is a directory; the caller
+/// passes `project.join(".git/hooks").is_dir()`. The path is tildified to
+/// `~/...` when the project sits under `home`, matching the convention in the
+/// example configs, and rendered absolute otherwise. The project dir is mounted
+/// at its real path and an `ro` entry's destination defaults to its source, so
+/// this lands `.git/hooks` read-only exactly over the copy in the working tree.
+///
+/// A git worktree or submodule keeps `.git` as a *file*, not a directory, so it
+/// has no local `.git/hooks` and is simply skipped here; resolving the real
+/// gitdir for those is out of scope.
+fn git_hooks_ro(project: &Path, home: &Path, hooks_exists: bool) -> Option<String> {
+    if !hooks_exists {
+        return None;
+    }
+    let hooks = project.join(".git/hooks");
+    Some(match hooks.strip_prefix(home) {
+        Ok(rest) => format!("~/{}", rest.display()),
+        Err(_) => hooks.display().to_string(),
+    })
 }
 
 /// Boot the box if it is not already running, then open a session in it: an
@@ -440,4 +484,36 @@ fn confirm(prompt: &str) -> Result<bool> {
         answer.trim().to_ascii_lowercase().as_str(),
         "y" | "yes"
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn git_project_under_home_yields_a_tildified_hooks_entry() {
+        let home = Path::new("/home/alice");
+        let project = Path::new("/home/alice/dev/proj");
+        assert_eq!(
+            git_hooks_ro(project, home, true),
+            Some("~/dev/proj/.git/hooks".to_string())
+        );
+    }
+
+    #[test]
+    fn git_project_outside_home_yields_an_absolute_hooks_entry() {
+        let home = Path::new("/home/alice");
+        let project = Path::new("/srv/work/proj");
+        assert_eq!(
+            git_hooks_ro(project, home, true),
+            Some("/srv/work/proj/.git/hooks".to_string())
+        );
+    }
+
+    #[test]
+    fn a_non_git_project_yields_no_hooks_entry() {
+        let home = Path::new("/home/alice");
+        let project = Path::new("/home/alice/dev/proj");
+        assert_eq!(git_hooks_ro(project, home, false), None);
+    }
 }

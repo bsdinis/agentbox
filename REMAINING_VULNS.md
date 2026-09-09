@@ -9,7 +9,7 @@ Working doc for the vectors from the breakout red-team (full detail in
 - A3 — overbroad bind source (`/`, host home, ancestor) → *fixed*
 
 **In progress (decided, not tracked here):**
-- G1 — `.git/hooks` executes on host → `agentbox init` maps `.git/hooks` read-only when `.git` is detected. **Status: in progress — background agent, worktree `g1-githooks`.**
+- G1 — `.git/hooks` executes on host → `agentbox init` maps `.git/hooks` read-only when `.git` is detected. **Status: ✅ DONE, integrated — `init` emits ro `.git/hooks` for git projects (needs host `cargo test`).**
 
 Everything below is **still open**. The through-line: none is a namespace-containment
 failure — each is a *trust boundary* where the box writes data (or shares a network) that a

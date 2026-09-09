@@ -91,10 +91,11 @@ ro = [".git/hooks"]
 ```
 
 With that, the box can read the hooks but cannot plant new ones for `git` on the
-host to run. Note this is a **recommended config entry you add**, not something
-`agentbox` does for you: `agentbox init` does *not* currently emit a
-`.git/hooks` read-only map (automatic support is planned but not yet in place),
-so add it yourself if you want it.
+host to run. `agentbox init` now does this for you: run in a git repository, it
+emits a read-only `.git/hooks` entry in the generated `.agentbox.toml` by
+default, so a fresh project is protected without your having to add it. (A git
+worktree or submodule, whose `.git` is a file rather than a directory, has no
+local `.git/hooks` and is skipped; add the entry yourself there if you need it.)
 
 Most of the other entries in the table above **cannot** be locked down this way,
 because they are project source that has to stay writable for the agent to do
