@@ -20,7 +20,7 @@ left blank, and `agentbox config` prints what a project actually resolves to.
 | --- | --- | --- | --- |
 | `name` | string | project directory name | Box name prefix. The box is `<name>-<6 hex of the project path>`, so two projects called `api` never collide. |
 | `hostname` | string | box name | Hostname inside the box; shows in your prompt. |
-| `network` | `"host"` \| `"none"` \| `"nat"` | `"host"` | See [usage.md](usage.md#networking). |
+| `network` | `"host"` \| `"none"` \| `"nat"` | `"nat"` | See [usage.md](usage.md#networking). |
 | `rw` | list of strings | `[]` | Extra read-write mounts. `"PATH"` or `"HOST:CONTAINER"`. |
 | `ro` | list of strings | `["~/.gitconfig", "~/.config/jj", "~/.config/git"]` | Read-only mounts, same syntax. |
 | `packages` | list of strings | `[]` | pacman packages installed into the box the first time it is created. |

@@ -172,22 +172,27 @@ $ agentbox shell --map ~/dev/other-repo --rw-map ~/tmp/out
 ## Networking
 
 ```toml
-network = "host"   # default: shares the host network namespace
+network = "nat"    # default: private namespace, veth pair, NAT via systemd-networkd
+network = "host"   # shares the host network namespace
 network = "none"   # no network at all
-network = "nat"    # private namespace, veth pair, NAT via systemd-networkd
 ```
 
-`host` is simplest and what you usually want: `pacman`, `npm` and API calls all
-work with zero setup. The cost is that the box can reach services bound to the
-host's `localhost` and can bind host ports.
+`nat` is the default: the box gets its own network namespace with working
+outbound connectivity (`pacman`, `npm` and API calls all work), while the host's
+`localhost` services and abstract-namespace sockets (e.g. the X11 display) stay
+out of reach.
+
+`host` shares the host network namespace: simplest and zero setup, but the box
+can reach services on the host's `localhost`, bind host ports, and connect to
+host abstract sockets such as the X11 server. Opt into it only for a trusted
+box — see [security.md](security.md).
 
 `none` is the strong option for a review or refactor task that needs no
 network. Package installs will fail, so bake what you need into `packages`
 first.
 
-`nat` gives the box its own network namespace, so host `localhost` is out of
-reach. It requires `systemd-networkd` enabled on the host, which is not the
-default on Arch with NetworkManager:
+Because `nat` is the default, note it requires `systemd-networkd` enabled on the
+host, which is not the default on Arch with NetworkManager:
 
 ```console
 $ sudo systemctl enable --now systemd-networkd

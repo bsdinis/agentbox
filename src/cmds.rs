@@ -83,8 +83,8 @@ pub fn init(dir: &Option<PathBuf>, force: bool) -> Result<()> {
 # box name prefix; the default is this directory's name
 # name = "{name}"
 
-# host | none | nat
-# network = "host"
+# nat (default) | host | none  (host exposes localhost and X11 to the box)
+# network = "nat"
 
 # extra packages installed into this box the first time it is created
 packages = []

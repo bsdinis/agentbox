@@ -63,11 +63,12 @@ pub const DEFAULT_BASE_PACKAGES: &[&str] = &[
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Network {
-    /// Share the host's network namespace. Simple, and reaches host localhost.
+    /// Share the host's network namespace. Reaches host localhost services and
+    /// abstract sockets (e.g. the X11 display); opt in only for a trusted box.
     Host,
     /// No network at all.
     None,
-    /// Private namespace with a veth pair, NAT'd by systemd-networkd.
+    /// Private namespace with a veth pair, NAT'd by systemd-networkd. The default.
     Nat,
 }
 
@@ -158,7 +159,7 @@ impl Default for Config {
         Config {
             name: None,
             hostname: None,
-            network: Network::Host,
+            network: Network::Nat,
             rw: vec![],
             ro: ["~/.gitconfig", "~/.config/jj", "~/.config/git"]
                 .map(String::from)
@@ -477,6 +478,18 @@ mod tests {
         // A layer that says nothing leaves the earlier value in place.
         cfg.apply(layer("network = 'none'"));
         assert_eq!(cfg.apparmor, Some(false));
+    }
+
+    #[test]
+    fn the_default_network_is_nat() {
+        assert_eq!(Config::default().network, Network::Nat);
+        // An empty layer leaves the default in place.
+        let mut cfg = Config::default();
+        cfg.apply(layer(""));
+        assert_eq!(cfg.network, Network::Nat);
+        // An explicit mode still wins.
+        cfg.apply(layer("network = 'host'"));
+        assert_eq!(cfg.network, Network::Host);
     }
 
     #[test]

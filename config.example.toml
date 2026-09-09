@@ -12,7 +12,7 @@
 # this file to what every box on this host genuinely wants.
 
 [defaults]
-# network = "host"        # host | none | nat
+# network = "nat"   # nat (default) | host | none  (host exposes localhost/X11)
 
 # Read-only mounts every box gets, on top of the built-in ~/.gitconfig,
 # ~/.config/git and ~/.config/jj. Keep credentials out of this list.
