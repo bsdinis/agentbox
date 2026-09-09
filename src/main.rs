@@ -110,6 +110,11 @@ enum Command {
     Init {
         #[arg(long)]
         force: bool,
+        /// Write ~/.config/agentbox/config.toml instead, from the shipped
+        /// example - the one file `cargo install` cannot copy in for you,
+        /// since it does not leave the source checkout behind
+        #[arg(long, conflicts_with = "dir")]
+        global: bool,
         /// Project directory (default: the current directory)
         #[arg(value_name = "DIR")]
         dir: Option<String>,
@@ -221,7 +226,13 @@ fn run() -> Result<()> {
 
     match &cli.command {
         Command::Build { refresh, force } => cmds::build(*refresh, *force),
-        Command::Init { force, dir } => cmds::init(dir, *force),
+        Command::Init { force, global, dir } => {
+            if *global {
+                cmds::init_global(*force)
+            } else {
+                cmds::init(dir, *force)
+            }
+        }
         Command::Shell(args) | Command::Run(args) => {
             cmds::shell(&args.target.r#box, &args.overrides(), args.root, &args.cmd)
         }

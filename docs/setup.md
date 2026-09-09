@@ -62,6 +62,32 @@ This runs `cargo build --release`, installs the binary to `~/.local/bin`
 yet. Edit that file to change the base package list or the defaults every box
 inherits.
 
+`cargo install --path ~/dev/agentbox` (or, once published, `cargo install
+agentbox`) works too, and needs nothing from `install.sh`: a missing
+`~/.config/agentbox/config.toml` is not an error, just no extra defaults on
+top of the built-in ones (`config::load` folds in an empty layer when the
+file is absent). The one thing `install.sh` does that a plain `cargo install`
+cannot is put a copy of `config.example.toml` on disk for you to edit, since
+`cargo install` discards the source checkout once the binary is built -
+`cargo install` from crates.io builds in a scratch directory, and even
+`--path` only ever installs the compiled binary. Run this once, whichever way
+you installed:
+
+```console
+$ agentbox init --global          # writes ~/.config/agentbox/config.toml
+```
+
+It writes the same template `install.sh` would have copied, since it's the
+same file, compiled into the binary. `--force` overwrites an existing one.
+
+The optional AppArmor profile is the one piece of the source checkout that
+genuinely has no substitute: `contrib/apparmor/agentbox-nspawn` has to be
+installed as root from an actual file on disk (see
+[contrib/apparmor/README.md](../contrib/apparmor/README.md)), so it still
+needs a checkout (or the file downloaded on its own) regardless of how you
+installed the binary. agentbox runs fine without it either way - the profile
+is defense in depth, applied only when it is loaded, never a launch gate.
+
 Nothing but the binary is needed at run time, so you can build once and copy
 `target/release/agentbox` to another machine with the same systemd generation.
 

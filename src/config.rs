@@ -13,6 +13,10 @@ use serde::Deserialize;
 use crate::host::{env_var, host};
 
 pub const PROJECT_FILE: &str = ".agentbox.toml";
+/// The shipped template for `~/.config/agentbox/config.toml`, embedded so
+/// `agentbox init --global` can materialize it without the source checkout
+/// `cargo install` leaves behind - see `cmds::init_global`.
+pub const EXAMPLE_CONFIG: &str = include_str!("../config.example.toml");
 /// `background = "auto"`: leave systemd-nspawn to tint the terminal as it
 /// likes, rather than naming a colour or turning it off.
 pub const BACKGROUND_AUTO: &str = "auto";
@@ -440,8 +444,7 @@ mod tests {
     /// keeps the two in step but this test.
     #[test]
     fn the_example_config_shows_the_real_default_package_list() {
-        let example = include_str!("../config.example.toml");
-        let listed: Vec<&str> = example
+        let listed: Vec<&str> = EXAMPLE_CONFIG
             .lines()
             .skip_while(|line| !line.starts_with("# base_packages = ["))
             .take_while(|line| !line.starts_with("# ]"))

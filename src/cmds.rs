@@ -228,6 +228,41 @@ rw = []
     Ok(())
 }
 
+/// Materialize `~/.config/agentbox/config.toml` from the embedded example,
+/// the way `install.sh` does when run from a source checkout - the one thing
+/// it does that a bare `cargo install` cannot, since crates.io and `--path`
+/// both discard the checkout once the binary is built. Config layering
+/// already treats a missing global file as "no extra defaults" (see
+/// `config::load`), so this is a one-time convenience for editing it, not a
+/// requirement for agentbox to run.
+pub fn init_global(force: bool) -> Result<()> {
+    let dest = config::global_path();
+    if dest.exists() && !force {
+        bail!(
+            "{} already exists (use --force to overwrite)",
+            dest.display()
+        );
+    }
+    if dry_run() {
+        print!("{}", config::EXAMPLE_CONFIG);
+        return Ok(());
+    }
+    let confdir = dest
+        .parent()
+        .ok_or_else(|| anyhow!("{} has no parent directory", dest.display()))?;
+    let created = !confdir.exists();
+    fs::create_dir_all(confdir).with_context(|| format!("cannot create {}", confdir.display()))?;
+    fs::write(&dest, config::EXAMPLE_CONFIG)
+        .with_context(|| format!("cannot write {}", dest.display()))?;
+    // `init` runs unprivileged, but may also be reached through sudo.
+    let _ = std::os::unix::fs::chown(&dest, Some(host().user.uid), Some(host().user.gid));
+    if created {
+        let _ = std::os::unix::fs::chown(confdir, Some(host().user.uid), Some(host().user.gid));
+    }
+    println!("wrote {}", dest.display());
+    Ok(())
+}
+
 /// `init` is usually the first command run in a project, which makes it the
 /// earliest chance to say that this one can never be put in a box.
 fn warn_if_unmappable(project: &Path) {
