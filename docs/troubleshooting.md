@@ -219,6 +219,31 @@ Mount points are prepared on every launch, not only when the box is created, so
 adding a mount to `.agentbox.toml` and starting the box again is enough — no
 `rm` or `reset` needed.
 
+## `Permission denied` writing *beside* a mapped file, not to it
+
+The mount itself works, but the directory holding it is not writable, so a tool
+cannot create its own files next to what you mapped in. Typically:
+
+```
+warning-path: Unable to locate data directory derived from $HOME: '~/.local/share/fish'.
+warning-path: The error was 'Permission denied (os error 13)'.
+```
+
+after mapping `~/.local/share/nvim/lazy`, or claude asking to log in again after
+`~/.claude/.credentials.json` was mapped in.
+
+The cause was agentbox creating a bind destination's missing ancestors as *host*
+root, which is not in the box's shifted UID range and so shows up inside the box
+as an unmapped owner (`nobody`) on a `0755` directory. Mapping any dotfile
+conjures one of these under the sandbox user's home — `~/.claude`, `~/.local`,
+`~/.local/share`, `~/.config` — and each of them blocked the user from writing
+anything alongside the mount.
+
+Ancestors are now given the owner of the host directory of the same name, and an
+ancestor left behind as host root is repaired on the next launch, so `agentbox
+shell` once with an up-to-date agentbox is the whole fix. Confirm inside the box
+with `ls -ld ~/.claude ~/.local/share` — the owner should be you, not `nobody`.
+
 ## `cannot map ... systemd-nspawn mounts its own /tmp there`
 
 A project, or a mapped directory, cannot live under `/tmp`, `/run`, `/dev`,
@@ -320,6 +345,46 @@ box must be in booted mode (`agentbox up`) so it can configure `host0`. Check
 the host side with `networkctl status ve-<box>`.
 
 With `network = "none"` there is no network by design.
+
+## `nat` boxes have no network, and `networkctl` shows the veth `unmanaged`
+
+If `networkctl status ve-<box>` reports `Network File: n/a (unmanaged)` and the
+journal has
+
+```
+ve-<box>: Failed to update link state file /run/systemd/netif/links/NN, ignoring: Permission denied
+```
+
+then the host's own networkd cannot write its runtime state, so it never
+configures the host side of the veth: no DHCP server, no address and no NAT, and
+every `nat` box comes up with no network while `host` mode still works. Check who
+owns that state:
+
+```console
+$ ls -lnd /run/systemd/netif /run/systemd/netif/links
+$ getent passwd systemd-network
+```
+
+An owner that is *not* `systemd-network`'s UID means an agentbox built before
+this was fixed chowned it. `bootstrap()` used to rbind the host's `/run` and
+`/dev` into the image, and the systemd package's install scriptlets then ran
+`systemd-tmpfiles --create` inside that chroot; the rules in
+`/usr/lib/tmpfiles.d` name owners by user *name*, which resolve against the
+*image's* `/etc/passwd`, so the chowns landed on the host's real files with the
+image's UIDs. `/run/uuidd`, `/run/tpm2-tss/eventlog` and `/dev/kvm`'s group are
+usually hit too.
+
+The build no longer touches either path — it uses a throwaway tmpfs — but a host
+already affected has to be repaired, which `systemd-tmpfiles` will do from the
+host's own rules:
+
+```console
+$ sudo systemd-tmpfiles --create
+$ sudo systemctl restart systemd-networkd
+```
+
+A reboot does the same thing, since all of it lives in `/run`. No image rebuild
+is needed: the damage was to the host, not to the image.
 
 ## `agentbox up` fails or the box will not boot
 
