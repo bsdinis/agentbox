@@ -21,6 +21,34 @@ To run on Debian/Fedora, replace `bootstrap()` in `src/base.rs` with
 `src/config.rs`. Nothing else in the tool knows which distribution is inside
 the box.
 
+## nat networking
+
+`nat` (the default) gives each box its own network namespace, so it never sees
+the host's `localhost` services or abstract sockets such as the X11 display. It
+still reaches the internet, through the host, which needs two things:
+
+1. **`systemd-networkd` enabled on the host.** nspawn hands the box's veth to
+   networkd, which runs a DHCP server for it and sets up the NAT. It is not
+   enabled by default on Arch:
+
+   ```console
+   $ sudo systemctl enable --now systemd-networkd
+   ```
+
+2. **If you use NetworkManager, tell it to leave the container veths alone.**
+   Otherwise NM claims `ve-*`/`vz-*` before networkd does, no DHCP answers, and
+   the box gets only a link-local address with no route:
+
+   ```console
+   $ printf '[keyfile]\nunmanaged-devices=interface-name:ve-*;interface-name:vz-*\n' \
+       | sudo tee /etc/NetworkManager/conf.d/agentbox-nspawn.conf
+   $ sudo systemctl reload NetworkManager
+   ```
+
+If a nat box comes up without a route, `agentbox` warns on launch and points
+here. Without this setup, use `network = "host"` (shares the host's stack - note
+the exposure in [security.md](security.md)) or `network = "none"` (offline).
+
 ## Install
 
 ```console

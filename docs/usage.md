@@ -194,17 +194,16 @@ box — see [security.md](security.md).
 network. Package installs will fail, so bake what you need into `packages`
 first.
 
-Because `nat` is the default, note it requires `systemd-networkd` enabled on the
-host, which is not the default on Arch with NetworkManager:
+Because `nat` is the default, note it needs a little host setup: `systemd-networkd`
+enabled on the host, and - if you use NetworkManager - NM told to leave the
+container veths (`ve-*`/`vz-*`) alone. See [setup.md](setup.md#nat-networking)
+for the exact steps. If a nat box comes up without a route, `agentbox` warns on
+launch and points there.
 
-```console
-$ sudo systemctl enable --now systemd-networkd
-$ agentbox up      # nat needs booted mode so the box can configure host0
-```
-
-`agentbox` masks `systemd-networkd` and `systemd-resolved` inside boxes that
-use host networking, precisely so a booted box can never reconfigure your
-host's interfaces. In `nat` mode they are left enabled.
+`agentbox` masks `systemd-networkd` and `systemd-resolved` inside boxes that use
+host networking, so a booted box can never reconfigure your host's interfaces.
+In `nat` mode it enables them *in the box* instead, so the box configures its own
+`host0` and DNS.
 
 ## Resource limits
 
