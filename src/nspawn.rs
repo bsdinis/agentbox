@@ -578,6 +578,7 @@ pub fn create(sb: &Sandbox) -> Result<bool> {
         }
         mask_host_network_units(sb)?;
     }
+    perform_copies(sb)?;
     write_settings(sb)?;
     write_unit_caps(sb)?;
     write_unit_apparmor(sb)?;
@@ -792,6 +793,33 @@ pub fn check_supported(sb: &Sandbox) -> Result<()> {
             }
         }
     }
+    // `cpy` destinations land inside the box rootfs before it boots too (a
+    // one-time `cp -a` rather than a mount), so they need the same
+    // destination checks as a bind, and the same overbroad-source guard on
+    // where they may read from - reused here as a conservative starting
+    // default (see `Sandbox::copies()`'s doc comment); a considered
+    // cpy-specific policy is left to a follow-up review.
+    for copy in sb.copies() {
+        if let Some(reason) = unsafe_dst(&copy.dst) {
+            bail!("refusing an unsafe cpy destination: {reason}");
+        }
+        if let Some(base) = shadowed_by_nspawn(&copy.dst) {
+            bail!(
+                "cpy destination {} is under {base}, which systemd-nspawn covers with \
+                 a mount of its own, so a copy placed there would be hidden once the \
+                 box boots; give it a destination of its own.",
+                copy.dst.display()
+            );
+        }
+        if let Some(reason) = overbroad_reason(&copy.src, &sb.user.home, state_dir()) {
+            bail!(
+                "refusing cpy map of {}: its source is {}; a box must not be \
+                 granted access to the host beyond its project",
+                copy.src.display(),
+                reason
+            );
+        }
+    }
     let unsupported = unsupported_binds(sb);
     if unsupported.is_empty() {
         return Ok(());
@@ -943,6 +971,99 @@ fn prepare_mount_point(sb: &Sandbox, bind: &Bind) -> Result<()> {
         Some(sb.shift(map_id(meta.gid()))),
     )
     .with_context(|| format!("cannot chown {}", target.display()))
+}
+
+/// Apply every `cpy` entry: a one-time, copy-if-absent snapshot into the
+/// box's own overlay, never a live mount.
+///
+/// Unlike a bind, a `cpy` source is never mounted, so it cannot straddle a
+/// rewrite of its lower layer the way a live overlay mount can (see
+/// "Overlayfs never revalidates its lower layer" in CLAUDE.md) - once copied,
+/// the destination is just an ordinary file in the box's own upper layer,
+/// with no lower layer to go stale. That also means it needs no
+/// `owneridmap`/ID-mapped-mount support: the copy is chowned once, right
+/// here, to the box's own shifted sandbox user, reusing the same
+/// `shift`/`map_id` math `prepare_mount_point` already uses for a bind's
+/// mount point.
+///
+/// A destination that already exists inside the box - because a previous
+/// session copied it, or the box itself has since written there - is left
+/// alone entirely: that is what makes this copy-if-absent rather than a
+/// resync, and what makes `agentbox reset` (which empties the box's upper
+/// layer) the way to force a fresh copy on the box's next boot.
+///
+/// The actual copy shells out to `cp -a` rather than walking the tree in
+/// Rust, so symlinks, modes and xattrs are coreutils' problem, not ours - the
+/// same convention `mount`/`umount`/`mkdir -p` already follow in this file.
+/// `sh(..).run()` already fails closed on a non-zero exit (bails, aborting
+/// the launch), matching how a missing `ssh_keys` entry or a failed package
+/// install are already fatal here: a half-copied box is never let through to
+/// boot.
+///
+/// `--dry-run` never mounts the overlay, so there is no way to know whether a
+/// destination is already present inside it; the report below lists the
+/// planned mappings rather than predicting which would actually copy.
+fn perform_copies(sb: &Sandbox) -> Result<()> {
+    let copies = sb.copies();
+    if dry_run() {
+        if copies.is_empty() {
+            return Ok(());
+        }
+        println!("--- cpy (copied into the box the first time each destination is absent) ---");
+        for copy in &copies {
+            println!("  {} -> {}", copy.src.display(), copy.dst.display());
+        }
+        return Ok(());
+    }
+    for copy in &copies {
+        let target = sb.inside(&copy.dst);
+        if target.symlink_metadata().is_ok() {
+            continue; // already present: copy-if-absent means leave it alone.
+        }
+        if let Some(parent) = target.parent() {
+            create_parents_mapped(sb, parent)?;
+        }
+        info(&format!(
+            "copying {} into box {} at {}",
+            copy.src.display(),
+            sb.name,
+            copy.dst.display()
+        ));
+        if let Err(e) = sh(argv!["cp", "-a", "--", copy.src.clone(), target.clone()]).run() {
+            cleanup_partial_copy(&target);
+            return Err(e);
+        }
+        let uid = sb.shift(map_id(sb.user.uid));
+        let gid = sb.shift(map_id(sb.user.gid));
+        if let Err(e) = sh(argv![
+            "chown",
+            "-R",
+            "--",
+            format!("{uid}:{gid}"),
+            target.clone()
+        ])
+        .run()
+        {
+            cleanup_partial_copy(&target);
+            return Err(e);
+        }
+    }
+    Ok(())
+}
+
+/// Undo whatever a failed `cp -a`/`chown -R` left on disk. Copy-if-absent's
+/// only signal is "does the destination exist", so a half-copied or
+/// wrong-owner leftover would otherwise look identical to a finished copy on
+/// every future launch and be skipped forever - stuck until `agentbox reset`
+/// throws away the box's whole upper layer. Removing it here means the next
+/// launch attempt retries this one entry from scratch instead.
+fn cleanup_partial_copy(target: &Path) {
+    if sh(argv!["rm", "-rf", "--", target]).run().is_err() {
+        crate::warn(&format!(
+            "failed to clean up partial cpy target {} left by a failed copy",
+            target.display()
+        ));
+    }
 }
 
 /// Line up the box's networking units with its network mode.

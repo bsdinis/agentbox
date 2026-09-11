@@ -11,7 +11,7 @@ Working doc for the vectors from the breakout red-team (full detail in
 - B3 — no LSM → optional AppArmor profile, fail-soft → *fixed*
 - G1 — `.git/hooks` executes on host → `agentbox init` maps it read-only for git projects → *fixed*
 - A5 / B2 — host-net exposure (X11, host localhost) → **`nat` is now the default** → *fixed*
-- A2 / C1 / B1 / G2 — rw-mount / `.claude` trust boundary → *documented* in `docs/security.md` (config, not code)
+- A2 / C1 / B1 / G2 — rw-mount / `.claude` trust boundary → *documented* in `docs/security.md` (config, not code); A2's "writable but not the host's" half now also has a code-level answer, the `cpy` mapping type (see A2 below)
 
 Host **runtime** testing is still recommended (nat connectivity + first-run package install, the
 box-scoped ssh-agent lifecycle, and the AppArmor drop-in); compile and unit tests pass in-box.
@@ -69,6 +69,20 @@ agent must *read*, read-only. Two sub-parts need your call:
 special case of the rw-mount trust issue. Document how to set up each auth option and how the mounts
 should be configured.
 **Status (Claude):** ✅ DONE, integrated — `docs/security.md` §"Running Claude Code inside a box" (own writable `.claude`; API-key vs OAuth mount setups).
+
+**Update:** the `cpy` mapping type (`src/sandbox.rs`, `src/nspawn.rs`) has since landed as a real
+code-level resolution of the "(a) writable, but not the host's" half of the proposal above — the
+part this decision previously only approximated via a dedicated host directory bound `rw` (a
+decoy `~/.claude`/`~/.claude.json` you kept separate from your real one, still a live bind and
+still a trust call resting entirely on you never mixing the two up). `cpy` instead copies a seed
+file (`~/.claude.json` in particular) into the box's own overlay once, on first boot with the
+destination absent, and never mounts anything: the box's writes never propagate to any host file
+at all, decoy or otherwise. The dedicated-`rw`-directory pattern is still the right answer when
+state needs to persist *across* `agentbox reset` (`cpy` content is wiped with the rest of the
+box's overlay on reset), so both remain documented in `docs/security.md`, with `cpy` now the
+preferred default and the `rw` directory kept for that one remaining case. See
+`docs/configuration.md`#`cpy` and `docs/design.md` ("Why `cpy` is a one-time copy, not a nested
+overlay") for the mechanism.
 &nbsp;
 
 ---
@@ -127,6 +141,12 @@ output visible on the host. This is an underlying trust property of rw mounts (`
 `.cargo`, `build.rs`, and similar): an agent can weaponize innocuous-looking files that the host
 later executes. Document it so users know a box-touched repo may be tainted when used outside.
 **Status (Claude):** ✅ DONE, integrated — `docs/security.md` (rw-mount trust boundary + weaponized-file list; copy-mode rejected).
+
+Note: the `cpy` mapping type added since (see A2's update above) does not revisit this decision.
+`cpy` is a one-time copy *into* the box for auxiliary files where write-back is unwanted; it is
+not a copy of the project *out of* a live bind, so it does nothing for a project directory that
+must stay a writable, host-visible bind for the workflow to make sense. `docs/security.md` now
+says this explicitly, so a reader of the `cpy` docs doesn't mistake it for the rejected proposal.
 &nbsp;
 
 ---

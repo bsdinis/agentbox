@@ -30,6 +30,8 @@ PROJ="$(mktemp -d "$root/agentbox-verify-XXXXXX")"
 REF="$(mktemp -d "$root/agentbox-refonly-XXXXXX")"
 LIMITS="$(mktemp -d "$root/agentbox-limits-XXXXXX")"
 NAT="$(mktemp -d "$root/agentbox-nat-XXXXXX")"
+CPY="$(mktemp -d "$root/agentbox-cpy-XXXXXX")"
+CPYSRC="$(mktemp -d "$root/agentbox-cpysrc-XXXXXX")"
 BSTATE=""
 FAKE=""
 pass=0 fail=0
@@ -46,7 +48,8 @@ cleanup() {
   "$AGENTBOX" rm "$PROJ" -y >/dev/null 2>&1
   "$AGENTBOX" rm "$LIMITS" -y >/dev/null 2>&1
   "$AGENTBOX" rm "$NAT" -y >/dev/null 2>&1
-  rm -rf "$PROJ" "$REF" "$LIMITS" "$NAT"
+  "$AGENTBOX" rm "$CPY" -y >/dev/null 2>&1
+  rm -rf "$PROJ" "$REF" "$LIMITS" "$NAT" "$CPY" "$CPYSRC"
   # The throwaway image is owned by the shifted container UIDs, so it needs root.
   [[ -n "$FAKE" ]] && sudo rm -rf "$FAKE"
   [[ -n "$BSTATE" ]] && sudo rm -rf "$BSTATE"
@@ -430,6 +433,36 @@ fi
 echo
 echo '--- 11. the host itself is unharmed ---'
 check 'host mounts under /dev and /run survived' "$(lost_mounts)" 'none lost'
+
+echo
+echo '--- 12. cpy: copy-if-absent, not a live mount ---'
+# A cpy entry with no explicit dst lands at the same absolute path inside the
+# box as its host source, same as an rw/ro entry - so CPYSRC never has to sit
+# under either sandbox user's home.
+echo 'seed-v1' > "$CPYSRC/seed.txt"
+cat > "$CPY/.agentbox.toml" <<TOML
+network = "host"
+cpy = ["$CPYSRC"]
+TOML
+cpy() { "$AGENTBOX" run "$CPY" -- "$@"; }
+check 'first boot copies the host source in' \
+  "$(cpy cat "$CPYSRC/seed.txt")" 'seed-v1'
+cpy sh -c "echo edited > $CPYSRC/seed.txt"
+check 'a write inside the box lands on its own copy' \
+  "$(cpy cat "$CPYSRC/seed.txt")" 'edited'
+check 'the write never reached the host source' \
+  "$(cat "$CPYSRC/seed.txt")" 'seed-v1'
+# Rewrite the host source while the box's copy still exists: copy-if-absent
+# means this is never resynced - the exact overlay-staleness bug class a live
+# mount of a mutable host directory would hit (see "Overlayfs never
+# revalidates its lower layer" in CLAUDE.md), sidestepped here by never
+# mounting at all.
+echo 'seed-v2' > "$CPYSRC/seed.txt"
+check 'a later host rewrite is not resynced into the box' \
+  "$(cpy cat "$CPYSRC/seed.txt")" 'edited'
+"$AGENTBOX" reset "$CPY" -y >/dev/null 2>&1
+check 'reset makes the destination absent again' \
+  "$(cpy cat "$CPYSRC/seed.txt")" 'seed-v2'
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [[ -n "${KEEP:-}" ]] && printf 'kept: %s (agentbox rm %s)\n' "$BOXNAME" "$BOXNAME"

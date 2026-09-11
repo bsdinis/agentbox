@@ -7,7 +7,7 @@ Two files, both optional, plus CLI overrides. Precedence, lowest to highest:
 3. `./.agentbox.toml` in the project directory
 4. command-line flags
 
-Lists (`rw`, `ro`, `packages`, `pass_env`) **accumulate** across layers, keeping
+Lists (`rw`, `ro`, `cpy`, `packages`, `pass_env`) **accumulate** across layers, keeping
 first-seen order and dropping duplicates. Tables (`env`) merge key by key.
 Scalars are replaced. So a project can add mounts but not remove the ones the
 built-in defaults or your global config insist on - which also means there is
@@ -23,6 +23,7 @@ left blank, and `agentbox config` prints what a project actually resolves to.
 | `network` | `"host"` \| `"none"` \| `"nat"` | `"nat"` | See [usage.md](usage.md#networking). |
 | `rw` | list of strings | `[]` | Extra read-write mounts. `"PATH"` or `"HOST:CONTAINER"`. A box can write these, and the host may later execute what it wrote — see [security.md](security.md). |
 | `ro` | list of strings | `["~/.gitconfig", "~/.config/jj", "~/.config/git"]` | Read-only mounts, same syntax. |
+| `cpy` | list of strings | `[]` | One-time copy-if-absent sources, same `"src"`/`"src:dst"` syntax as `rw`/`ro`. See [below](#cpy-one-time-copy-if-absent). |
 | `packages` | list of strings | `[]` | pacman packages installed into the box the first time it is created. |
 | `env` | table | `{}` | Variables set inside the box, verbatim. |
 | `pass_env` | list of strings | `["TERM", "COLORTERM", "LANG"]` | Host variables forwarded **if set**. Use for `ANTHROPIC_API_KEY`, `GITHUB_TOKEN`. |
@@ -133,6 +134,58 @@ Three consequences worth knowing:
   claimed before either list — can never be made read-only as a whole. Making a
   subdirectory of the project read-only does work, since that is nesting:
   `ro = ["~/dev/api/vendor"]`.
+
+### `cpy`: one-time copy-if-absent
+
+`cpy` shares `rw`/`ro`'s exact `"src"` / `"src:dst"` syntax, `~`/`$VAR` expansion
+and per-layer accumulation, but it is not a mount at all: it is a one-time
+snapshot. The first time a box boots with its destination absent, the host
+source is copied in with `cp -a` and chowned to the sandbox user; once that
+destination exists inside the box, every later launch leaves it completely
+alone, so nothing the box wrote there is ever overwritten and nothing the host
+does to the source afterward is ever seen.
+
+```toml
+cpy = [
+  "~/.claude.json",                 # same path inside and out
+  "~/seed-config.json:~/.config/thing.json",
+]
+```
+
+That is the whole difference from `rw`/`ro`, and it matters:
+
+* **No `owneridmap`, no live propagation.** A bind mount is a kernel-level view
+  of the host path for the life of the box; `cpy` is a plain file the box now
+  owns in its own overlay. Writes the agent makes afterward stay in the box and
+  never reach the host - the opposite of `rw`, where writes land back on the
+  host as you.
+* **Reset-sensitive.** `cpy` content lives in the box's upper layer like
+  anything else the box wrote, so it survives ordinary `down`/`up` cycles but
+  is wiped by `agentbox reset` along with everything else the box wrote. The
+  *next* boot after a reset copies fresh from whatever the host source looks
+  like at that moment - reset is the only way to force a re-copy, there is no
+  resync in between.
+* **Same source and destination guards as `rw`/`ro`.** A `cpy` source goes
+  through the same overbroad-source check (no `/`, host home, or the agentbox
+  state directory), and a `cpy` destination goes through the same
+  `/tmp`/`/run`/`/dev`/`/proc`/`/sys` and path-safety checks a bind destination
+  does - a violation aborts the launch before anything is created. A missing
+  source is skipped with a warning, same as `rw`/`ro`.
+* **Destinations dedupe against binds and each other.** A `cpy` destination
+  already claimed by the project directory, an `rw`/`ro` bind, or an earlier
+  `cpy` entry is skipped with a warning rather than landing as a stray inode
+  under what will become a mount point - see "Nesting: one mount inside
+  another" above for why an inode under a bind's destination is a problem.
+* **`--dry-run` reports plans, not outcomes.** Since dry-run never mounts the
+  overlay, agentbox cannot tell whether a given destination is already present
+  inside a real box; it prints every `src -> dst` pair `cpy` would consider,
+  not which ones would actually copy.
+
+Good uses: seeding `~/.claude.json` so a fresh box skips Claude Code's
+first-run wizard (see [security.md](security.md#running-claude-code-inside-a-box)
+and [usage.md](usage.md#the-first-run-wizard-in-a-fresh-box)), or dropping a
+starter config the agent should be free to diverge from without ever writing
+back to your host copy.
 
 ## Project file example
 

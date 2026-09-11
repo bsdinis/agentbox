@@ -107,6 +107,9 @@ pub struct Layer {
     pub network: Option<Network>,
     pub rw: Option<Vec<String>>,
     pub ro: Option<Vec<String>>,
+    /// One-time copy-if-absent sources: `"src"`/`"src:dst"`, same syntax as
+    /// `rw`/`ro`, but never a live mount - see `Sandbox::copies()`.
+    pub cpy: Option<Vec<String>>,
     pub packages: Option<Vec<String>>,
     pub pass_env: Option<Vec<String>>,
     pub env: Option<BTreeMap<String, String>>,
@@ -134,6 +137,9 @@ pub struct Config {
     pub network: Network,
     pub rw: Vec<String>,
     pub ro: Vec<String>,
+    /// One-time copy-if-absent sources, before `expand()`. Empty - the
+    /// default - means nothing is copied.
+    pub cpy: Vec<String>,
     pub packages: Vec<String>,
     pub pass_env: Vec<String>,
     pub env: BTreeMap<String, String>,
@@ -168,6 +174,7 @@ impl Default for Config {
             ro: ["~/.gitconfig", "~/.config/jj", "~/.config/git"]
                 .map(String::from)
                 .to_vec(),
+            cpy: vec![],
             packages: vec![],
             pass_env: ["TERM", "COLORTERM", "LANG"].map(String::from).to_vec(),
             env: BTreeMap::new(),
@@ -195,6 +202,7 @@ impl Config {
         }
         extend(&mut self.rw, layer.rw);
         extend(&mut self.ro, layer.ro);
+        extend(&mut self.cpy, layer.cpy);
         extend(&mut self.packages, layer.packages);
         extend(&mut self.pass_env, layer.pass_env);
         extend(&mut self.ssh_keys, layer.ssh_keys);
@@ -485,6 +493,16 @@ mod tests {
     }
 
     #[test]
+    fn cpy_accumulates_across_layers_like_rw_and_ro() {
+        let mut cfg = Config::default();
+        assert!(cfg.cpy.is_empty());
+        cfg.apply(layer("cpy = ['~/seed-a']"));
+        cfg.apply(layer("cpy = ['~/seed-a', '~/seed-b']"));
+        // Accumulates in layer order, and a repeat is dropped - same as rw/ro.
+        assert_eq!(cfg.cpy, ["~/seed-a", "~/seed-b"]);
+    }
+
+    #[test]
     fn apparmor_defaults_to_unset_and_a_layer_can_set_it() {
         // Default: unset, i.e. on-if-available with no nag.
         let cfg = Config::default();
@@ -523,10 +541,7 @@ mod tests {
         ));
         // Raw specs are preserved (expansion is deferred to spawn time), the
         // list accumulates across layers, and a repeat is dropped.
-        assert_eq!(
-            cfg.ssh_keys,
-            ["~/.ssh/id_ed25519_a", "~/.ssh/id_ed25519_b"]
-        );
+        assert_eq!(cfg.ssh_keys, ["~/.ssh/id_ed25519_a", "~/.ssh/id_ed25519_b"]);
     }
 
     #[test]

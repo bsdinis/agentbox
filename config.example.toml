@@ -31,6 +31,15 @@ ro = []
 # Read-write mounts every box gets. Usually empty; the project dir is implicit.
 rw = []
 
+# One-time copy-if-absent sources every box gets: "src" or "src:dst", same
+# syntax as rw/ro, but never a live mount. Each source is copied into the box
+# ONCE, the first time its destination is absent - never re-synced from the
+# host afterwards, so `agentbox reset` (which empties the box's writes) is
+# what makes the next boot copy fresh again. Good for seeding editable state
+# (a starter config, a vendored cache) that the box should be free to diverge
+# from without ever writing back to the host.
+# cpy = []
+
 # Host environment variables forwarded into the box when they are set, on top
 # of the built-in TERM, COLORTERM and LANG.
 # pass_env = ["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "GITHUB_TOKEN"]

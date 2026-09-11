@@ -80,6 +80,18 @@ this tool exists for. The trade is real and it is intentional: you get the
 agent's work in place, and in return you own the job of reviewing it before you
 execute it.
 
+**This is not what `cpy` is for.** `cpy` (see
+[configuration.md](configuration.md#cpy-one-time-copy-if-absent)) is a
+one-time, copy-if-absent snapshot available as a config option, but it exists
+for the opposite goal from the one rejected above. The project directory is
+copy-mode's proposed target *because* you want the agent's writes to land on
+the host; `cpy` is for small, auxiliary config/credential-shaped paths -
+`~/.claude.json` is the running example in this document - where you
+specifically do **not** want the box's writes ever reaching the host. Reaching
+for `cpy` on the project directory itself would reproduce exactly the trade
+this section rejects; reaching for it on a seed file like `~/.claude.json` is
+the intended use, since nothing about that file benefits from write-back.
+
 ### What can and cannot be locked down
 
 One case *can* be closed off: `.git/hooks` never needs to be writable by the
@@ -137,10 +149,26 @@ host directory (one you keep separate from your real `~/.claude`) read-write:
 rw = ["~/.agentbox-claude/myproject:/home/you/.claude"]
 ```
 
-Never point the destination's source at your host `~/.claude`. The same applies
-to `~/.claude.json`: a dedicated file of your own mapped there is fine and is how
-you skip the first-run wizard in every new box (see
-[usage.md](usage.md#the-first-run-wizard-in-a-fresh-box)); your real one is not.
+Never point the destination's source at your host `~/.claude`. That workaround
+covers state you want to survive a `reset`; if you don't need that, `cpy` is
+the better tool for the one file most boxes actually need seeded:
+
+```toml
+# .agentbox.toml - seed the first-run wizard state, never a live host bind
+cpy = ["~/.agentbox-claude/myproject.json:~/.claude.json"]
+```
+
+That is how you skip the first-run wizard in every new box (see
+[usage.md](usage.md#the-first-run-wizard-in-a-fresh-box)) without ever
+bind-mounting a credentials-adjacent file into the box: the box gets a
+one-time copy it can freely rewrite, and nothing it writes ever reaches the
+host file. The trade is that `cpy` content does not survive `agentbox reset`
+(reset empties the box's overlay, so the *next* boot copies fresh from the
+host source again) - if you specifically want `.claude.json` state to persist
+*across* a reset, that is the real use case the dedicated-`rw`-directory
+workaround above still covers and `cpy` does not. Either way, your real
+`~/.claude.json` stays out of the mapping - only a dedicated file of your own
+is ever named as the source.
 
 ### Authentication
 

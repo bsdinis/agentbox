@@ -368,16 +368,29 @@ used as it already was. The remaining "do you trust this folder?" prompt is
 answerable in the box and persists, since `~/.claude.json` is writable there.
 Both survive until `agentbox reset` or `rm`.
 
-To keep them across a reset too, map a **dedicated** host file, not your own
-`~/.claude.json`:
+The recommended way to make every *new* box start past both prompts is `cpy`:
+seed a dedicated host file once, and agentbox copies it in the first time each
+box boots - never as a live bind, so nothing the box subsequently writes to
+`~/.claude.json` (session ids, costs, timings, MCP state - it rewrites this
+file constantly) ever reaches your host copy:
+
+```toml
+cpy = ["~/.agentbox-claude/myproject.json:~/.claude.json"]
+```
+
+If instead you want that state to persist *across* an `agentbox reset` (`cpy`
+content is wiped along with the rest of the box's overlay on reset, and only
+re-copied on the box's next boot), map a **dedicated** host file read-write
+instead, not your own `~/.claude.json`:
 
 ```toml
 rw = ["~/.agentbox-claude/myproject.json:/home/you/.claude.json"]
 ```
 
-`rw`, not `ro`: Claude Code rewrites this file on every session - session ids,
-costs, timings, MCP state - and a read-only mount makes it fail. That is a
-second reason it has to be a file of your own rather than the host's.
+`rw`, not `ro`: Claude Code rewrites this file on every session, and a
+read-only mount makes it fail. That is a second reason it has to be a file of
+your own rather than the host's - and, either way, the source is a dedicated
+file that only agentbox and your seeding ever touch.
 
 Seed it once and every box after that starts at the prompt, trust prompt
 included:

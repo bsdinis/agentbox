@@ -54,6 +54,15 @@ impl Bind {
     }
 }
 
+/// One host path copied into the box once, the first time its destination is
+/// absent from the box's own overlay - never a live mount. See
+/// `Sandbox::copies()` and `nspawn`'s `perform_copies`.
+#[derive(Debug, Clone)]
+pub struct Copy {
+    pub src: PathBuf,
+    pub dst: PathBuf,
+}
+
 #[derive(Debug)]
 pub struct Sandbox {
     pub name: String,
@@ -206,6 +215,57 @@ impl Sandbox {
         binds
     }
 
+    /// One-time copy-if-absent sources: `cpy` entries, in the same
+    /// `"src"`/`"src:dst"` syntax as `rw`/`ro` (reusing `split_spec` and
+    /// `expand` unchanged). Unlike `binds()`, these are never a live mount -
+    /// `nspawn::perform_copies` applies each one with a one-shot `cp -a` into
+    /// the box's own overlay, once, the first time its destination is absent.
+    ///
+    /// A source that does not exist is skipped with a warning rather than
+    /// failing, mirroring `binds()` - the current default; a reviewer may
+    /// prefer to fail closed here instead.
+    ///
+    /// A destination already claimed by the project directory or a `rw`/`ro`
+    /// bind (or by an earlier `cpy` entry) is skipped with a warning too:
+    /// nspawn mounts binds over their destinations only after every mount
+    /// point is prepared, so a `cpy` landing under one would become a stray,
+    /// invisible inode once the box boots - the same gotcha `prepare_mount_point`'s
+    /// doc comment already describes for a bind nested inside another bind.
+    ///
+    /// The overbroad-source guard (`overbroad_reason`) is applied to these
+    /// sources by `nspawn::check_supported`, at the same point it checks
+    /// `rw`/`ro` sources, reusing the bind-oriented rationale as a
+    /// conservative starting default pending a considered cpy-specific policy.
+    pub fn copies(&self) -> Vec<Copy> {
+        let mut claimed: Vec<PathBuf> = self.binds().into_iter().map(|b| b.dst).collect();
+        let mut copies = vec![];
+        for spec in &self.cfg.cpy {
+            let (src_spec, dst_spec) = split_spec(spec);
+            let src = expand(&src_spec);
+            let src = src.canonicalize().unwrap_or(src);
+            let dst = dst_spec.map(|d| expand(&d)).unwrap_or_else(|| src.clone());
+            if !src.exists() {
+                crate::warn(&format!(
+                    "skipping cpy map {} (does not exist)",
+                    src.display()
+                ));
+                continue;
+            }
+            if claimed.contains(&dst) {
+                crate::warn(&format!(
+                    "skipping cpy map {} -> {} (destination is already claimed by a \
+                     bind mount or another cpy entry)",
+                    src.display(),
+                    dst.display()
+                ));
+                continue;
+            }
+            claimed.push(dst.clone());
+            copies.push(Copy { src, dst });
+        }
+        copies
+    }
+
     /// The box-scoped ssh-agent's private state: its socket and pid file. Kept
     /// under the box's own state directory (mode 0700, owned by the invoking
     /// user) rather than a world-readable place, since the socket grants use of
@@ -352,7 +412,10 @@ mod tests {
     fn configured_keys_forward_only_the_scoped_agent_socket() {
         let sb = sandbox_with(vec!["~/.ssh/id_ed25519_projectx".into()]);
         let binds = sb.binds();
-        let agent: Vec<&Bind> = binds.iter().filter(|b| b.dst == sb.ssh_agent_dst()).collect();
+        let agent: Vec<&Bind> = binds
+            .iter()
+            .filter(|b| b.dst == sb.ssh_agent_dst())
+            .collect();
         assert_eq!(agent.len(), 1);
         let agent = agent[0];
         // The source is the box's own scoped socket, under the box state dir,
@@ -405,6 +468,86 @@ mod tests {
         assert!(overbroad_reason(state, home, state).is_some());
         assert!(overbroad_reason(Path::new("/var/lib/agentbox/boxes"), home, state).is_some());
         assert!(overbroad_reason(Path::new("/var/lib"), home, state).is_some());
+    }
+
+    /// A scratch directory under the host's own temp dir, unique to this test
+    /// process and cleaned up on drop - `cargo test` stays pure/no-container,
+    /// but `copies()` still has to be exercised against a real, statable
+    /// source, same as `overbroad_reason`'s tempdir-free tests exercise a pure
+    /// function instead.
+    struct Scratch(PathBuf);
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let dir =
+                std::env::temp_dir().join(format!("agentbox-test-{name}-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            Scratch(dir)
+        }
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn copies_builds_the_planned_list_and_skips_a_missing_source() {
+        let scratch = Scratch::new("cpy-basic");
+        let src = scratch.path().join("present-src");
+        std::fs::create_dir_all(&src).unwrap();
+        let dst = scratch.path().join("present-dst");
+        let missing_src = scratch.path().join("does-not-exist");
+
+        let cfg = Config {
+            cpy: vec![
+                format!("{}:{}", src.display(), dst.display()),
+                missing_src.display().to_string(),
+            ],
+            ..Config::default()
+        };
+        let sb = sandbox_with_cfg(cfg);
+        let copies = sb.copies();
+        // The missing source is skipped with a warning, not a panic, and only
+        // the entry with a real source survives.
+        assert_eq!(copies.len(), 1);
+        assert_eq!(copies[0].src, src.canonicalize().unwrap());
+        assert_eq!(copies[0].dst, dst);
+    }
+
+    #[test]
+    fn copies_skip_a_destination_already_claimed_by_a_bind() {
+        let scratch = Scratch::new("cpy-claimed");
+        let src = scratch.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        // The project directory's own destination is always claimed first.
+        let sb = sandbox_with_cfg(Config {
+            cpy: vec![format!("{}:/home/me/project", src.display())],
+            ..Config::default()
+        });
+        assert!(sb.copies().is_empty());
+    }
+
+    /// `nspawn::check_supported` applies the same `overbroad_reason` guard to
+    /// `cpy` sources that it already applies to `rw`/`ro` ones (see
+    /// `Sandbox::copies()`'s doc comment); `copies()` itself does not filter
+    /// on it, mirroring how `binds()` leaves that check to `check_supported`
+    /// too. This exercises the shared function against a source a `cpy` entry
+    /// could plausibly name, so a reviewer can see the same reason a bind
+    /// would be refused for applies here unchanged.
+    #[test]
+    fn a_cpy_source_naming_the_host_home_is_overbroad_like_a_bind() {
+        let home = Path::new("/home/alice");
+        let state = Path::new("/var/lib/agentbox");
+        assert!(overbroad_reason(home, home, state).is_some());
+        assert!(overbroad_reason(state, home, state).is_some());
+    }
+
+    fn sandbox_with_cfg(cfg: Config) -> Sandbox {
+        let _ = crate::host::init(None, false);
+        Sandbox::new(PathBuf::from("/home/me/project"), cfg)
     }
 
     #[test]

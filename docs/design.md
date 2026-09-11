@@ -109,6 +109,39 @@ by you, and no `safe.directory` incantations are needed.
 Host files inside a mapped directory owned by some *other* host user still show
 as `nobody`, which is the correct and expected outcome.
 
+## Why `cpy` is a one-time copy, not a nested overlay
+
+`rw`/`ro` give a box two ways to see a host path live: a read-write bind or a
+read-only one. `cpy` is deliberately a third, different mechanism - a one-time
+`cp -a` into the box's own overlay upper layer, done once per box lifetime
+(reset resets it), never a mount at all.
+
+The alternative that looks obvious - mount the host directory as a nested
+overlay's `lowerdir`, upper layer inside the box - was rejected for the exact
+reason generations exist for the base image: **overlayfs never revalidates its
+lower layer.** A mount straddling a rewrite of its `lowerdir` goes on serving
+whatever it cached for the life of that mount - a file the rewrite added can be
+listed by `readdir` and still `ENOENT` on open (see "Why an overlay" above, and
+`b41f4b8`). A `cpy` source is exactly the kind of host path a project keeps
+editing on the host side after the box has been booted for a while - a seed
+config, a vendored cache - so a nested overlay mount would reintroduce that bug
+class the moment someone touched the host source while a box's mount was live,
+with no generation scheme protecting it the way the base image is protected.
+
+A one-time copy sidesteps the problem instead of managing it: once `cp -a` has
+run, the destination is an ordinary file in the box's own upper layer with no
+lower layer of its own to go stale. There is nothing left to revalidate,
+because there is no longer a live relationship to the host path at all -
+which is also why `cpy` needs no `owneridmap`/ID-mapped-mount support: the
+copy is chowned once, to the box's own shifted sandbox user, the same
+`shift`/`map_id` math a bind's mount point already uses. The cost is the
+copy-if-absent semantics this implies: a `cpy` destination that already
+exists inside the box (a previous copy, or the box's own later write) is left
+alone rather than resynced, so `agentbox reset` - which already exists to
+empty a box's upper layer - is what makes the next boot copy fresh again. No
+new staleness-tracking machinery was needed because `cpy` never holds a mount
+open past the copy.
+
 ## Why the sandbox user mirrors you
 
 Same username, same UID and GID, home at `/home/<you>`. Paths are then spelled
