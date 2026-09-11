@@ -53,32 +53,34 @@ the exposure in [security.md](security.md)) or `network = "none"` (offline).
 
 ```console
 $ git clone <this repo> ~/dev/agentbox
-$ ~/dev/agentbox/install.sh              # or: install.sh --system
+$ cd ~/dev/agentbox
+$ ./install-deps.sh                # host packages: systemd-container, rust, nat networking
+$ cargo install --path .           # builds and installs to ~/.cargo/bin/agentbox
 ```
 
-This runs `cargo build --release`, installs the binary to `~/.local/bin`
-(`--system` puts it in `/usr/local/bin` instead), and copies
-`config.example.toml` to `~/.config/agentbox/config.toml` if you have no config
-yet. Edit that file to change the base package list or the defaults every box
-inherits.
+`install-deps.sh` only installs host dependencies (`systemd-container` for
+`systemd-nspawn`/`machinectl`, a Rust toolchain if you don't have one, and the
+`systemd-networkd`/NetworkManager setup `nat` networking needs) via `pacman`
+- it never touches agentbox itself. Once `cargo`, `systemd-container` and (for
+`agentbox build`) `pacman` are present, `cargo install --path .` (or, once
+published, `cargo install agentbox`) is the whole install: it builds and
+copies the binary to `~/.cargo/bin/agentbox` (`$CARGO_INSTALL_ROOT/bin` if
+you've set that), which most shells already have on `PATH`.
 
-`cargo install --path ~/dev/agentbox` (or, once published, `cargo install
-agentbox`) works too, and needs nothing from `install.sh`: a missing
-`~/.config/agentbox/config.toml` is not an error, just no extra defaults on
-top of the built-in ones (`config::load` folds in an empty layer when the
-file is absent). The one thing `install.sh` does that a plain `cargo install`
-cannot is put a copy of `config.example.toml` on disk for you to edit, since
-`cargo install` discards the source checkout once the binary is built -
-`cargo install` from crates.io builds in a scratch directory, and even
-`--path` only ever installs the compiled binary. Run this once, whichever way
-you installed:
+A missing `~/.config/agentbox/config.toml` is not an error, just no extra
+defaults on top of the built-in ones (`config::load` folds in an empty layer
+when the file is absent). Run this once, regardless of how you installed, to
+get an editable copy - `cargo install` discards the source checkout once the
+binary is built, so this is the only way to put `config.example.toml` on disk
+without a checkout lying around:
 
 ```console
 $ agentbox init --global          # writes ~/.config/agentbox/config.toml
 ```
 
-It writes the same template `install.sh` would have copied, since it's the
-same file, compiled into the binary. `--force` overwrites an existing one.
+It writes the same file that's checked in as `config.example.toml`, compiled
+into the binary. `--force` overwrites an existing one. Edit the result to
+change the base package list or the defaults every box inherits.
 
 The optional AppArmor profile is the one piece of the source checkout that
 genuinely has no substitute: `contrib/apparmor/agentbox-nspawn` has to be
@@ -228,7 +230,8 @@ freely. Only the paths you map in are shared.
 launch (subject to sudo's timestamp). If that annoys you:
 
 ```console
-$ ./install.sh --system     # so the binary lives somewhere only root can write
+$ cargo install --path .                            # if not already installed
+$ sudo install -Dm755 "$(command -v agentbox)" /usr/local/bin/agentbox
 $ printf '%s ALL=(root) NOPASSWD: /usr/local/bin/agentbox\n' "$USER" \
   | sudo install -m 440 /dev/stdin /etc/sudoers.d/50-agentbox
 ```
@@ -237,11 +240,12 @@ Be clear-eyed about what that does: the rule lets any process running as you
 run `agentbox` as root with arbitrary arguments, and `agentbox` mounts host
 directories into containers on request. It is a root-equivalent grant.
 
-Install with `--system` first if you take this route. A NOPASSWD rule naming a
-binary in a directory you can write to (`~/.local/bin`, or a checkout's
-`target/release`) is strictly worse than no rule at all: anything running as
-you can replace that file and become root. With `--system` the binary is
-root-owned, so the rule grants only what `agentbox` itself can do.
+Copy the binary into a root-owned directory first if you take this route. A
+NOPASSWD rule naming a binary in a directory you can write to (`~/.cargo/bin`,
+or a checkout's `target/release`) is strictly worse than no rule at all:
+anything running as you can replace that file and become root. Once it's
+under `/usr/local/bin` (root-owned, unless you've made it writable), the rule
+grants only what `agentbox` itself can do.
 
 ## Uninstall
 
@@ -250,5 +254,5 @@ $ agentbox ls                             # see what exists
 $ agentbox rm <box>                       # per box
 $ sudo rm -rf /var/lib/agentbox           # base image and all overlays
 $ sudo rm -f /etc/systemd/nspawn/*.nspawn # generated settings (check first)
-$ rm ~/.local/bin/agentbox
+$ cargo uninstall agentbox               # or: rm the binary wherever you installed it
 ```

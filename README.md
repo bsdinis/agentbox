@@ -40,13 +40,16 @@ $ agentbox shell                # you are now inside the sandbox
 
 ```console
 $ git clone <this repo> ~/dev/agentbox
-$ ~/dev/agentbox/install.sh    # cargo build --release, then into ~/.local/bin
+$ cd ~/dev/agentbox
+$ ./install-deps.sh            # host packages: systemd-container, rust, nat networking
+$ cargo install --path .       # builds and installs to ~/.cargo/bin/agentbox
 $ agentbox build               # one-time: build the shared base image (~5 min)
 ```
 
 A single Rust binary with no run-time dependencies beyond `systemd-nspawn`
-itself. `install.sh --system` installs to `/usr/local/bin`, which is what you
-want if you later add the passwordless-sudo rule from
+itself. See [docs/setup.md](docs/setup.md#install) for installing to a
+root-owned directory instead, which is what you want if you add the
+passwordless-sudo rule from
 [docs/setup.md](docs/setup.md#passwordless-launches).
 
 ## Verify it works

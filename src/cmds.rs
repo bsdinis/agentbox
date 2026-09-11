@@ -228,13 +228,13 @@ rw = []
     Ok(())
 }
 
-/// Materialize `~/.config/agentbox/config.toml` from the embedded example,
-/// the way `install.sh` does when run from a source checkout - the one thing
-/// it does that a bare `cargo install` cannot, since crates.io and `--path`
-/// both discard the checkout once the binary is built. Config layering
-/// already treats a missing global file as "no extra defaults" (see
-/// `config::load`), so this is a one-time convenience for editing it, not a
-/// requirement for agentbox to run.
+/// Materialize `~/.config/agentbox/config.toml` from the embedded example.
+/// `cargo install` - the only install path, whether from crates.io or
+/// `--path` - discards the source checkout once the binary is built, so this
+/// is the only way to get `config.example.toml` onto disk without one lying
+/// around. Config layering already treats a missing global file as "no extra
+/// defaults" (see `config::load`), so this is a one-time convenience for
+/// editing it, not a requirement for agentbox to run.
 pub fn init_global(force: bool) -> Result<()> {
     let dest = config::global_path();
     if dest.exists() && !force {

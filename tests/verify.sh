@@ -23,7 +23,7 @@ set -uo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
 AGENTBOX="${AGENTBOX_BIN:-$(command -v agentbox || echo "$here/../target/release/agentbox")}"
-[[ -x "$AGENTBOX" ]] || { echo "no agentbox binary; run install.sh first" >&2; exit 1; }
+[[ -x "$AGENTBOX" ]] || { echo "no agentbox binary; run 'cargo build --release' or 'cargo install --path .' first" >&2; exit 1; }
 root="${AGENTBOX_VERIFY_ROOT:-${XDG_CACHE_HOME:-$HOME/.cache}/agentbox-verify}"
 mkdir -p "$root" || { echo "cannot create $root" >&2; exit 1; }
 PROJ="$(mktemp -d "$root/agentbox-verify-XXXXXX")"
