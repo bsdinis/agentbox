@@ -346,6 +346,20 @@ pub fn settings_text(sb: &Sandbox) -> Result<String> {
     if let Some(families) = address_families(sb) {
         out.push_str(&format!("RestrictAddressFamilies={families}\n"));
     }
+    // `perf_event_open` is not in nspawn's default syscall allow list, so
+    // `perf = true` is what adds it. This is the only thing the flag does: it
+    // does not touch PrivateUsers= or grant any capability, because it
+    // couldn't help either way - perf's own permission check
+    // (`perfmon_capable()`) is `capable(CAP_PERFMON)`, which the kernel defines
+    // against `init_user_ns` specifically, so a process in this box's private
+    // user namespace can never satisfy it no matter what capability it holds
+    // internally. What that check gates (hardware/kernel/tracepoint events) is
+    // additionally controlled by the *host's* `kernel.perf_event_paranoid`
+    // sysctl - unaffected by this box, and not something agentbox changes for
+    // you. See docs/security.md#perf-inside-a-box.
+    if sb.cfg.perf {
+        out.push_str("SystemCallFilter=perf_event_open\n");
+    }
     for (key, value) in sb.env() {
         reject_control_chars("an environment variable name", &key)?;
         reject_control_chars("an environment variable value", &value)?;
@@ -1747,6 +1761,33 @@ mod tests {
     /// container rootfs so the lookup can be tested without one.
     fn has(paths: &'static [&'static str]) -> impl Fn(&Path) -> bool {
         move |candidate| paths.iter().any(|p| Path::new(p) == candidate)
+    }
+
+    fn sandbox_with_perf(perf: bool) -> Sandbox {
+        // host() is needed for Sandbox::new (the invoking user) and for env().
+        let _ = crate::host::init(None, false);
+        let cfg = crate::config::Config {
+            perf,
+            ..crate::config::Config::default()
+        };
+        Sandbox::new(PathBuf::from("/home/me/project"), cfg)
+    }
+
+    #[test]
+    fn perf_true_adds_the_syscall_filter_line() {
+        let sb = sandbox_with_perf(true);
+        let text = settings_text(&sb).unwrap();
+        assert!(
+            text.contains("SystemCallFilter=perf_event_open\n"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn perf_false_omits_the_syscall_filter_line() {
+        let sb = sandbox_with_perf(false);
+        let text = settings_text(&sb).unwrap();
+        assert!(!text.contains("SystemCallFilter"), "{text}");
     }
 
     const CWD: &str = "/home/me/project";

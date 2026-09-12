@@ -127,6 +127,10 @@ pub struct Layer {
     /// on the host, and stay silent otherwise. `Some(true)` also warns when it
     /// is unavailable; `Some(false)` opts out entirely.
     pub apparmor: Option<bool>,
+    /// Allow the `perf_event_open` syscall inside the box. Does not touch the
+    /// user namespace or grant any capability - see `Config::perf` and
+    /// docs/security.md#perf-inside-a-box.
+    pub perf: Option<bool>,
     pub uid_base: Option<u32>,
 }
 
@@ -161,6 +165,17 @@ pub struct Config {
     /// Whether to apply the shipped AppArmor profile. `None` - the default -
     /// means on-if-available (see `Layer::apparmor`).
     pub apparmor: Option<bool>,
+    /// Add `perf_event_open` to the box's syscall allow list. Off by default.
+    /// This alone rarely unlocks much: the box's user namespace means the
+    /// kernel's own `perfmon_capable()` check can never succeed inside it, no
+    /// matter what capability the box holds, so almost everything beyond
+    /// self-only software counters additionally needs the *host's*
+    /// `kernel.perf_event_paranoid` lowered - a machine-wide decision agentbox
+    /// cannot make on a box's behalf. The shipped AppArmor profile does not
+    /// mediate this syscall at all (no `perf_event_open` LSM hook exists in
+    /// AppArmor), so it adds no defense-in-depth here. See
+    /// docs/security.md#perf-inside-a-box.
+    pub perf: bool,
     pub uid_base: u32,
 }
 
@@ -186,6 +201,7 @@ impl Default for Config {
             cpu_quota: None,
             tasks_max: None,
             apparmor: None,
+            perf: false,
             uid_base: UID_BASE_DEFAULT,
         }
     }
@@ -216,6 +232,7 @@ impl Config {
         self.cpu_quota = layer.cpu_quota.or(self.cpu_quota.take());
         self.tasks_max = layer.tasks_max.or(self.tasks_max.take());
         self.apparmor = layer.apparmor.or(self.apparmor.take());
+        self.perf = layer.perf.unwrap_or(self.perf);
         self.network = layer.network.unwrap_or(self.network);
         self.uid_base = layer.uid_base.unwrap_or(self.uid_base);
     }
@@ -229,6 +246,7 @@ pub struct Overrides {
     pub packages: Vec<String>,
     pub network: Option<Network>,
     pub ssh_keys: Vec<String>,
+    pub perf: Option<bool>,
 }
 
 pub fn global_path() -> PathBuf {
@@ -304,6 +322,7 @@ pub fn load(project: &Path, overrides: &Overrides) -> Result<Config> {
         packages: Some(overrides.packages.clone()),
         network: overrides.network,
         ssh_keys: Some(overrides.ssh_keys.clone()),
+        perf: overrides.perf,
         ..Layer::default()
     });
     check_background(cfg.background.as_deref())?;
@@ -516,6 +535,19 @@ mod tests {
         // A layer that says nothing leaves the earlier value in place.
         cfg.apply(layer("network = 'none'"));
         assert_eq!(cfg.apparmor, Some(false));
+    }
+
+    #[test]
+    fn perf_defaults_to_off_and_a_layer_can_turn_it_on() {
+        let mut cfg = Config::default();
+        assert!(!cfg.perf);
+        cfg.apply(layer("perf = true"));
+        assert!(cfg.perf);
+        // A layer that says nothing leaves the earlier value in place.
+        cfg.apply(layer("network = 'none'"));
+        assert!(cfg.perf);
+        cfg.apply(layer("perf = false"));
+        assert!(!cfg.perf);
     }
 
     #[test]

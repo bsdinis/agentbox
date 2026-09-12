@@ -240,3 +240,80 @@ file to plant new host-executed config. The principle to carry away:
   read,
 * **credentials read-only, or supplied via `pass_env`** - never read-write, and
   never the whole host `~/.claude`.
+
+## perf inside a box
+
+`perf_event_open(2)` fails with `EPERM` inside a box by default, and the reason
+is worth understanding before reaching for `perf = true`: it is not a missing
+capability, it is the box's user namespace itself.
+
+Perf's own permission check is `perfmon_capable()`:
+
+```c
+// include/linux/capability.h
+static inline bool perfmon_capable(void)
+{
+    return capable(CAP_PERFMON) || capable(CAP_SYS_ADMIN);
+}
+// kernel/capability.c
+bool capable(int cap) { return ns_capable(&init_user_ns, cap); }
+```
+
+`capable()` checks the capability against `init_user_ns` - the host's own root
+user namespace - specifically, not against whatever namespace the calling
+process happens to be in. `cap_capable()` (`security/commoncap.c`) walks from
+the target namespace toward the caller's; when the target is `init_user_ns`
+and the caller lives in a box's private, nested user namespace, that walk
+returns `-EPERM` immediately, unconditionally. **No capability the box grants
+itself inside its own namespace can ever satisfy this check** - `Capability=
+CAP_PERFMON` in the `.nspawn` file would be a pure no-op, so agentbox does not
+offer it. The only way to satisfy `perfmon_capable()` from inside a box would
+be `PrivateUsers=no` - not creating a private user namespace for the box at
+all - which is not what `perf = true` does, because it would mean container
+root literally is host root, discarding the boundary the whole rest of this
+document is written to describe. That trade is not worth perf.
+
+What `perf = true` actually does instead is narrower: it only unblocks the
+*syscall* (`SystemCallFilter=perf_event_open`, which is not in nspawn's
+default allow list). Whether that gets you anything depends entirely on the
+kernel's own gates in `perf_allow_cpu()` / `perf_allow_kernel()` /
+`perf_allow_tracepoint()` (`kernel/events/core.c`), each of which only calls
+`perfmon_capable()` - the check that always fails in a box - once the
+**host's** `kernel.perf_event_paranoid` sysctl is above a threshold:
+
+| Host `perf_event_paranoid` | What works from inside a namespaced box |
+| --- | --- |
+| `2` or more (many distros' default) | Nothing beyond self-only software counters (`PERF_COUNT_SW_*`: page faults, context switches, cpu-clock) - these are never paranoid-gated. |
+| `1` | Also CPU hardware events (cycles, instructions) on the box's own process. |
+| `0` | Also kernel-symbol/call-graph profiling. |
+| `-1` | Also raw tracepoints. |
+
+That sysctl is global - it is not namespaced, agentbox cannot set it on a
+box's behalf, and lowering it relaxes the same thing for every process on the
+host, not just the box. That is the real, honest cost of making `perf = true`
+useful: broader performance-counter visibility for everyone on the machine.
+It is a much narrower cost than defeating the user namespace would be - it
+grants observability, not a DAC bypass, mount capability, or anything else
+`CAP_SYS_ADMIN` would otherwise imply - but it is not free, and it is yours to
+make, on the host, outside of any project's `.agentbox.toml`:
+
+```console
+$ sudo sysctl kernel.perf_event_paranoid=1     # or lower, depending on what you need
+```
+
+One further residual risk once that sysctl is lowered: `perf_event_open`'s
+"CPU-wide" mode (a specific CPU core, every process on it, rather than one
+target process) is not mediated by any namespace at all - a box in this mode
+can observe activity from processes outside its own PID namespace, including
+the host's, via cycle-counting side channels. Per-process monitoring stays
+bounded by the box's PID namespace regardless of the sysctl.
+
+**The AppArmor profile does not cover any of this.** `contrib/apparmor/
+agentbox-nspawn`'s broad `capability,` grant is irrelevant here - AppArmor
+implements no `perf_event_*` LSM hooks at all (unlike SELinux, which has a
+dedicated `perf_event` object class with `PERF_EVENT__CPU`/`PERF_EVENT__KERNEL`/
+`PERF_EVENT__TRACEPOINT` permissions). There is no profile rule that could gate this
+syscall even if you wanted one. `SystemCallFilter=perf_event_open` is the
+*only* control agentbox applies, with no defense-in-depth behind it - another
+reason `perf` defaults to off and is meant to be turned on deliberately, per
+project, rather than left on everywhere.

@@ -80,6 +80,12 @@ struct Target {
     /// Repeatable. The host's own agent is never forwarded.
     #[arg(long = "ssh-key", value_name = "PATH")]
     ssh_key: Vec<String>,
+
+    /// Allow perf_event_open for this launch. See docs/security.md#perf-inside-a-box:
+    /// the box's user namespace still blocks almost everything perf can do
+    /// without also lowering the host's kernel.perf_event_paranoid.
+    #[arg(long)]
+    perf: bool,
 }
 
 impl Target {
@@ -90,6 +96,7 @@ impl Target {
             packages: vec![],
             network: self.network,
             ssh_keys: self.ssh_key.clone(),
+            perf: self.perf.then_some(true),
         }
     }
 }

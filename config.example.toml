@@ -67,6 +67,17 @@ rw = []
 # has it, otherwise /bin/bash.
 # shell = "/usr/bin/fish"
 
+# Allow perf_event_open inside the box (SystemCallFilter=). Off by default,
+# and by itself this rarely unlocks much: the box's user namespace means
+# perf's own permission check can never succeed there no matter what
+# capability the box holds, so this alone only allows self-only software
+# counters. Profiling hardware or kernel events also needs the HOST's
+# kernel.perf_event_paranoid lowered - a machine-wide relaxation, not scoped
+# to this box - and the shipped AppArmor profile does not mediate this
+# syscall at all. Read docs/security.md#perf-inside-a-box before turning
+# this on.
+# perf = true
+
 # Socket address families every box may use, as RestrictAddressFamilies=.
 # Unset - the default - applies no filter and says so explicitly, which is what
 # stops systemd-nspawn 261+ warning that a future release will narrow the

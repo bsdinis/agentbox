@@ -35,6 +35,7 @@ left blank, and `agentbox config` prints what a project actually resolves to.
 | `cpu_quota` | string | unset | `CPUQuota=`, e.g. `"400%"`. |
 | `tasks_max` | string | unset | `TasksMax=`. |
 | `apparmor` | bool | unset | Apply the shipped AppArmor profile as a defense-in-depth LSM layer. Unset means on-if-available: applied when the profile is loaded on the host, silently skipped otherwise. `true` also warns when it is expected but unavailable; `false` opts out. See below and [contrib/apparmor/README.md](../contrib/apparmor/README.md). |
+| `perf` | bool | `false` | Allow `perf_event_open` inside the box (`SystemCallFilter=perf_event_open`). Off by default; see [security.md](security.md#perf-inside-a-box) before turning it on - it does not touch the user namespace or grant a capability, and by itself only unlocks self-only software counters. The rest needs the *host's* `kernel.perf_event_paranoid` lowered, and the AppArmor profile below does not mediate this syscall at all. |
 | `uid_base` | int | `1310720000` | Host UID that container UID 0 maps to. Multiple of 65536. Only meaningful before a box's first mount: each base generation is stamped with the `uid_base` it was shifted for, and a box configured with a different one refuses to mount against it rather than mismatch silently. |
 
 The three caps are unit properties rather than container settings. Every launch
@@ -67,6 +68,15 @@ denies and how to install it (per-distro — AppArmor, not SELinux) is in
 [contrib/apparmor/README.md](../contrib/apparmor/README.md). `--dry-run` only
 shows the profile when run from a context that can read the kernel's loaded-
 profile list (i.e. as root), since that list is root-readable.
+
+`perf` adds one line, `SystemCallFilter=perf_event_open`, to the `.nspawn`
+file's `[Exec]` section — nspawn's own syscall filter is an allow list, and
+that syscall is not on it by default. Nothing else changes: `PrivateUsers=`
+stays exactly as it is, and no capability is granted, because none would help
+— see [security.md](security.md#perf-inside-a-box) for why. Read that section
+before setting `perf = true`; the syscall being reachable is not the same as
+perf being useful, and the thing that actually gates it (the host's
+`kernel.perf_event_paranoid`) is outside agentbox's control on purpose.
 
 Global-config-only:
 
@@ -259,6 +269,7 @@ argument is a directory and is never read as a box name.
 | `--rw-map PATH[:DEST]` | same | Extra read-write mount. Repeatable. |
 | `--network MODE` | same | Override network mode for this launch. |
 | `--ssh-key PATH` | same | Add a private key to the box's dedicated ssh-agent (confirm-on-use). Repeatable. The host's own agent is never forwarded. |
+| `--perf` | same | Turn on `perf` for this launch (see `perf` above and [security.md](security.md#perf-inside-a-box)). Can only turn it on, not override a project's `perf = true` off. |
 | `--packages PKG` | `shell`, `run` | Extra packages on box creation. Repeatable. |
 | `--root` | `shell`, `run` | Run as container root instead of the sandbox user. |
 | `--dry-run` | all | Print the commands and the `.nspawn` file, change nothing. |
