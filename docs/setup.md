@@ -11,6 +11,7 @@
 | A Rust toolchain, to build | `agentbox` is a small Rust binary; nothing is needed at run time | `cargo --version` |
 | A filesystem supporting ID-mapped mounts under your code | ext4, xfs, btrfs, f2fs all work | `findmnt -T ~` |
 | `sudo` | `agentbox` re-execs itself as root | — |
+| `socat` | relays the box-scoped ssh-agent's socket into the box; only exercised by projects that set `ssh_keys` | `which socat` |
 
 The host does **not** need `systemd-networkd`, `arch-install-scripts`, or
 `btrfs`. Network mode `nat` is the one exception — see below.

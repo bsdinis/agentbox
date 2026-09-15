@@ -6,6 +6,7 @@ use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::CommandExt;
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 
@@ -1276,7 +1277,6 @@ fn ssh_key_paths(sb: &Sandbox) -> Result<Vec<PathBuf>> {
 /// A command that will run as the invoking user with a clean, minimal
 /// environment, so the scoped agent and `ssh-add` never inherit root's.
 fn as_user(sb: &Sandbox, program: &str) -> std::process::Command {
-    use std::os::unix::process::CommandExt;
     let mut cmd = std::process::Command::new(program);
     // Drop to the user: gid before uid, the order std applies them in. The
     // child keeps root's supplementary groups (CommandExt::groups is unstable),
@@ -1308,10 +1308,19 @@ fn read_agent_pid(sb: &Sandbox) -> Option<u32> {
         .and_then(|s| s.trim().parse().ok())
 }
 
-/// True when this box already has a live scoped agent listening on its socket,
-/// so `spawn_ssh_agent` can reuse it rather than restart it.
+fn read_relay_pid(sb: &Sandbox) -> Option<u32> {
+    fs::read_to_string(sb.agent_relay_pidfile())
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+}
+
+/// True when this box already has a live scoped agent *and* a live relay in
+/// front of it, so `spawn_ssh_agent` can reuse them rather than restart both.
 fn agent_alive(sb: &Sandbox) -> bool {
-    sb.scoped_agent_sock().exists() && read_agent_pid(sb).is_some_and(process_alive)
+    sb.scoped_agent_sock().exists()
+        && read_agent_pid(sb).is_some_and(process_alive)
+        && sb.scoped_agent_relay_sock().exists()
+        && read_relay_pid(sb).is_some_and(process_alive)
 }
 
 /// `SSH_AGENT_PID=12345; export SSH_AGENT_PID;` -> 12345.
@@ -1325,14 +1334,30 @@ fn parse_agent_pid(output: &str) -> Option<u32> {
 }
 
 /// Start a dedicated ssh-agent for this box holding only the configured keys,
-/// and forward *its* socket into the box. The host's own `$SSH_AUTH_SOCK` is
-/// never used. Idempotent: a live agent is left running.
+/// put a relay in front of it, and forward *the relay's* socket into the box.
+/// The host's own `$SSH_AUTH_SOCK` is never used. Idempotent: a live agent and
+/// relay are left running.
 ///
 /// Runs as the invoking user, so the socket is owned by them and `owneridmap`
 /// maps it onto the sandbox user inside the box (exactly as the previous
 /// host-agent forwarding relied on), and so the keys never sit in root's memory.
 /// Each key is added with `ssh-add -c`, so every use of it prompts the user on
 /// the host to confirm. Fails closed at the first sign of trouble.
+///
+/// The relay exists because binding the agent's own socket straight into the
+/// box does not work. `owneridmap` only translates file *ownership metadata* -
+/// what `stat`/`ls` see - not process credentials. The box runs in its own
+/// user namespace (`PrivateUsers=`), so a process inside it has a real,
+/// host-global UID of `uid_base + <its in-box uid>`, never the invoking user's
+/// actual UID. `ssh-agent` checks the connecting peer's real UID via
+/// `getsockopt(SO_PEERCRED)` and closes the connection if it does not match
+/// its own - so a direct bind lets `connect()` succeed and then the agent
+/// hangs up immediately, surfacing to the box as `ssh-add -l` dying with
+/// SIGPIPE ("communication with agent failed"). `socat` relays the connection
+/// instead: it runs as the same user as the agent, so *its* leg to the agent
+/// passes the peer-UID check, and its own listening socket - the one actually
+/// bound into the box - performs no such check on the box's connections at
+/// all.
 pub fn spawn_ssh_agent(sb: &Sandbox) -> Result<()> {
     if sb.cfg.ssh_keys.is_empty() {
         return Ok(());
@@ -1402,20 +1427,76 @@ pub fn spawn_ssh_agent(sb: &Sandbox) -> Result<()> {
             );
         }
     }
+
+    let relay_sock = sb.scoped_agent_relay_sock();
+    let _ = fs::remove_file(&relay_sock);
+    let log_path = sb.agent_dir().join("relay.log");
+    let log = fs::File::create(&log_path)
+        .with_context(|| format!("cannot create {}", log_path.display()))?;
+    // SAFETY: pre_exec runs in the forked child before exec, single-threaded
+    // at that point, and only calls the async-signal-safe `setsid(2)`; it
+    // touches no Rust state shared with the parent.
+    let mut relay = unsafe {
+        as_user(sb, "socat")
+            .arg(format!(
+                "UNIX-LISTEN:{},fork,unlink-early,mode=600",
+                relay_sock.display()
+            ))
+            .arg(format!("UNIX-CONNECT:{}", sock.display()))
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(log)
+            .pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            })
+            .spawn()
+    }
+    .context(
+        "cannot start the box-scoped ssh-agent relay; install `socat` \
+         (see docs/setup.md)",
+    )?;
+    fs::write(sb.agent_relay_pidfile(), format!("{}\n", relay.id()))
+        .with_context(|| format!("cannot write {}", sb.agent_relay_pidfile().display()))?;
+
+    // socat has no synchronous "ready" signal like ssh-agent's own stdout
+    // line, so poll briefly for its listening socket rather than trust a
+    // bare `spawn()` success, which only proves the fork/exec happened.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+    loop {
+        if relay_sock.exists() {
+            break;
+        }
+        if let Ok(Some(status)) = relay.try_wait() {
+            let detail = fs::read_to_string(&log_path).unwrap_or_default();
+            teardown_ssh_agent(sb)?;
+            bail!("the box-scoped ssh-agent relay exited immediately ({status}): {detail}");
+        }
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
     Ok(())
 }
 
-/// Stop this box's scoped agent and remove its socket and pid file. Idempotent
-/// and best-effort: safe to call when no agent was ever started, and it never
-/// leaves the ssh-agent process running.
+/// Stop this box's scoped agent and its relay, and remove their sockets and
+/// pid files. Idempotent and best-effort: safe to call when neither was ever
+/// started, and it never leaves either process running.
 pub fn teardown_ssh_agent(sb: &Sandbox) -> Result<()> {
     if dry_run() {
         return Ok(());
     }
-    if let Some(pid) = read_agent_pid(sb) {
+    for pid in [read_agent_pid(sb), read_relay_pid(sb)]
+        .into_iter()
+        .flatten()
+    {
         if process_alive(pid) {
             // SAFETY: kill only signals the process; the pid was written by us
-            // for this box's agent. As root we may signal the user's process.
+            // for this box's agent or relay. As root we may signal the user's
+            // process.
             unsafe {
                 libc::kill(pid as libc::pid_t, libc::SIGTERM);
             }
@@ -1423,6 +1504,9 @@ pub fn teardown_ssh_agent(sb: &Sandbox) -> Result<()> {
     }
     let _ = fs::remove_file(sb.scoped_agent_sock());
     let _ = fs::remove_file(sb.agent_pidfile());
+    let _ = fs::remove_file(sb.scoped_agent_relay_sock());
+    let _ = fs::remove_file(sb.agent_relay_pidfile());
+    let _ = fs::remove_file(sb.agent_dir().join("relay.log"));
     let _ = fs::remove_dir(sb.agent_dir());
     Ok(())
 }

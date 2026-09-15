@@ -18,6 +18,11 @@ command -v pacman >/dev/null || {
 missing=()
 command -v systemd-nspawn >/dev/null || missing+=(systemd-container)
 command -v cargo >/dev/null || missing+=(rust)
+# socat relays the box-scoped ssh-agent's socket: a box's own user namespace
+# gives it a different real UID than the invoking user, which ssh-agent's own
+# peer-UID check would otherwise reject outright. Only needed when a project
+# sets `ssh_keys`, but cheap enough to always install.
+command -v socat >/dev/null || missing+=(socat)
 
 if (( ${#missing[@]} )); then
   echo "installing: ${missing[*]}"

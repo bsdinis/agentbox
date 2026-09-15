@@ -198,16 +198,18 @@ impl Sandbox {
             }
         }
 
-        // The only sanctioned forwarding path: the box's own dedicated agent,
-        // holding just the configured keys. Never the host's `$SSH_AUTH_SOCK`,
-        // which would expose every key it holds. The socket is created by
-        // `nspawn::spawn_ssh_agent` before the mount points are prepared; it is
-        // marked `internal` so `check_supported` does not refuse its source for
-        // living under the agentbox state directory.
+        // The only sanctioned forwarding path: a relay in front of the box's
+        // own dedicated agent, holding just the configured keys. Never the
+        // host's `$SSH_AUTH_SOCK`, which would expose every key it holds, and
+        // never the agent's own socket directly - see `nspawn::spawn_ssh_agent`
+        // for why the relay exists. Both sockets are created by
+        // `nspawn::spawn_ssh_agent` before the mount points are prepared; the
+        // bind is marked `internal` so `check_supported` does not refuse its
+        // source for living under the agentbox state directory.
         if !self.cfg.ssh_keys.is_empty() {
             binds.push(Bind {
                 read_only: false,
-                src: self.scoped_agent_sock(),
+                src: self.scoped_agent_relay_sock(),
                 dst: self.ssh_agent_dst(),
                 internal: true,
             });
@@ -266,10 +268,11 @@ impl Sandbox {
         copies
     }
 
-    /// The box-scoped ssh-agent's private state: its socket and pid file. Kept
-    /// under the box's own state directory (mode 0700, owned by the invoking
-    /// user) rather than a world-readable place, since the socket grants use of
-    /// the configured keys.
+    /// The box-scoped ssh-agent's private state: its socket, its relay's
+    /// socket, and both their pid files. Kept under the box's own state
+    /// directory (mode 0700, owned by the invoking user) rather than a
+    /// world-readable place, since the sockets grant use of the configured
+    /// keys.
     pub fn agent_dir(&self) -> PathBuf {
         self.dir().join("ssh-agent")
     }
@@ -280,6 +283,17 @@ impl Sandbox {
 
     pub fn agent_pidfile(&self) -> PathBuf {
         self.agent_dir().join("agent.pid")
+    }
+
+    /// The relay's own socket - what actually gets bound into the box. See
+    /// `nspawn::spawn_ssh_agent` for why a direct bind of `scoped_agent_sock`
+    /// does not work.
+    pub fn scoped_agent_relay_sock(&self) -> PathBuf {
+        self.agent_dir().join("agent-relay.sock")
+    }
+
+    pub fn agent_relay_pidfile(&self) -> PathBuf {
+        self.agent_dir().join("relay.pid")
     }
 
     /// Where a forwarded agent socket appears inside the box.
@@ -418,9 +432,10 @@ mod tests {
             .collect();
         assert_eq!(agent.len(), 1);
         let agent = agent[0];
-        // The source is the box's own scoped socket, under the box state dir,
-        // not the host's $SSH_AUTH_SOCK.
-        assert_eq!(agent.src, sb.scoped_agent_sock());
+        // The source is the relay's socket, under the box state dir, not the
+        // agent's own socket and not the host's $SSH_AUTH_SOCK.
+        assert_eq!(agent.src, sb.scoped_agent_relay_sock());
+        assert_ne!(agent.src, sb.scoped_agent_sock());
         assert!(agent.src.starts_with(sb.dir()));
         // Marked internal so check_supported does not refuse a state-dir source.
         assert!(agent.internal);
