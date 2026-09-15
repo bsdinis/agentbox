@@ -116,6 +116,10 @@ pub struct Layer {
     /// Private-key paths a box-scoped ssh-agent should hold. Accumulates across
     /// layers like the other lists. Empty means no agent, and no forwarding.
     pub ssh_keys: Option<Vec<String>>,
+    /// Whether each use of a configured key must be confirmed on the host.
+    /// `None` - the default - means yes; `Some(false)` is a deliberate,
+    /// per-project opt into unattended use. See `Config::ssh_keys_confirm`.
+    pub ssh_keys_confirm: Option<bool>,
     pub shell: Option<String>,
     pub background: Option<String>,
     pub address_families: Option<String>,
@@ -151,6 +155,16 @@ pub struct Config {
     /// Empty - the default - means no agent is started and nothing is
     /// forwarded; the host's own `$SSH_AUTH_SOCK` is never bound in.
     pub ssh_keys: Vec<String>,
+    /// Whether each key is added with `ssh-add -c`, so using it prompts you on
+    /// the host to confirm. `true` - the default, and the only safe choice for
+    /// a box you do not fully trust - means a compromised or malicious process
+    /// in the box still cannot silently push, pull from private repos, or open
+    /// outbound SSH connections as you without your explicit say-so each time.
+    /// Setting this `false` is a conscious trade of that guardrail for
+    /// unattended operation (e.g. a fully autonomous agent with no human
+    /// present to click "allow"); see the `ssh_keys` row in
+    /// docs/configuration.md before doing so.
+    pub ssh_keys_confirm: bool,
     pub shell: Option<String>,
     /// Terminal background while the box runs. `None` - the default - means no
     /// tint at all, leaving the terminal the colour it already was.
@@ -194,6 +208,7 @@ impl Default for Config {
             pass_env: ["TERM", "COLORTERM", "LANG"].map(String::from).to_vec(),
             env: BTreeMap::new(),
             ssh_keys: vec![],
+            ssh_keys_confirm: true,
             shell: None,
             background: None,
             address_families: None,
@@ -222,6 +237,7 @@ impl Config {
         extend(&mut self.packages, layer.packages);
         extend(&mut self.pass_env, layer.pass_env);
         extend(&mut self.ssh_keys, layer.ssh_keys);
+        self.ssh_keys_confirm = layer.ssh_keys_confirm.unwrap_or(self.ssh_keys_confirm);
         self.env.extend(layer.env.unwrap_or_default());
         self.name = layer.name.or(self.name.take());
         self.hostname = layer.hostname.or(self.hostname.take());
@@ -548,6 +564,19 @@ mod tests {
         assert!(cfg.perf);
         cfg.apply(layer("perf = false"));
         assert!(!cfg.perf);
+    }
+
+    #[test]
+    fn ssh_keys_confirm_defaults_to_on_and_a_layer_can_turn_it_off() {
+        let mut cfg = Config::default();
+        assert!(cfg.ssh_keys_confirm);
+        cfg.apply(layer("ssh_keys_confirm = false"));
+        assert!(!cfg.ssh_keys_confirm);
+        // A layer that says nothing leaves the earlier value in place.
+        cfg.apply(layer("network = 'none'"));
+        assert!(!cfg.ssh_keys_confirm);
+        cfg.apply(layer("ssh_keys_confirm = true"));
+        assert!(cfg.ssh_keys_confirm);
     }
 
     #[test]

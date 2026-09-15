@@ -189,6 +189,12 @@ rw = []
 # host. Empty - the default - means no agent and no forwarding.
 # ssh_keys = ["~/.ssh/id_ed25519"]
 
+# Set false only for unattended use (no human present to confirm a key's use):
+# the box can then push, pull and open outbound SSH connections as you with no
+# per-use prompt. true (the default) is the only safe choice for a box you do
+# not fully trust.
+# ssh_keys_confirm = true
+
 # terminal background while a session runs. Unset leaves your terminal the
 # colour it already is; "auto" lets systemd-run pick its own per-box tint, and
 # an ANSI SGR background such as "48;5;52" picks your own.
@@ -532,6 +538,7 @@ fn effective_toml(sb: &Sandbox) -> String {
         pass_env,
         env,
         ssh_keys,
+        ssh_keys_confirm,
         background,
         address_families,
         memory_max,
@@ -577,6 +584,7 @@ fn effective_toml(sb: &Sandbox) -> String {
     out.push_str(&format!("packages = {}\n", list(packages)));
     out.push_str(&format!("pass_env = {}\n", list(pass_env)));
     out.push_str(&format!("ssh_keys = {}\n", list(ssh_keys)));
+    out.push_str(&format!("ssh_keys_confirm = {ssh_keys_confirm}\n"));
     out.push_str("\n[env]\n");
     for (key, value) in env {
         out.push_str(&format!("{key} = {value:?}\n"));

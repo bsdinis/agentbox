@@ -1341,8 +1341,10 @@ fn parse_agent_pid(output: &str) -> Option<u32> {
 /// Runs as the invoking user, so the socket is owned by them and `owneridmap`
 /// maps it onto the sandbox user inside the box (exactly as the previous
 /// host-agent forwarding relied on), and so the keys never sit in root's memory.
-/// Each key is added with `ssh-add -c`, so every use of it prompts the user on
-/// the host to confirm. Fails closed at the first sign of trouble.
+/// Each key is added with `ssh-add -c` unless `ssh_keys_confirm = false`, so by
+/// default every use of it prompts the user on the host to confirm - see
+/// `Config::ssh_keys_confirm` before turning that off. Fails closed at the
+/// first sign of trouble.
 ///
 /// The relay exists because binding the agent's own socket straight into the
 /// box does not work. `owneridmap` only translates file *ownership metadata* -
@@ -1363,9 +1365,14 @@ pub fn spawn_ssh_agent(sb: &Sandbox) -> Result<()> {
         return Ok(());
     }
     let keys = ssh_key_paths(sb)?; // validate before touching anything
+    let confirm_note = if sb.cfg.ssh_keys_confirm {
+        "confirm-on-use"
+    } else {
+        "unattended - ssh_keys_confirm = false"
+    };
     if dry_run() {
         info(&format!(
-            "would start a box-scoped ssh-agent at {} holding {} key(s), confirm-on-use",
+            "would start a box-scoped ssh-agent at {} holding {} key(s), {confirm_note}",
             sb.scoped_agent_sock().display(),
             keys.len()
         ));
@@ -1387,7 +1394,7 @@ pub fn spawn_ssh_agent(sb: &Sandbox) -> Result<()> {
 
     let sock = sb.scoped_agent_sock();
     info(&format!(
-        "starting box-scoped ssh-agent for {} ({} key(s), confirm-on-use)",
+        "starting box-scoped ssh-agent for {} ({} key(s), {confirm_note})",
         sb.name,
         keys.len()
     ));
@@ -1410,9 +1417,12 @@ pub fn spawn_ssh_agent(sb: &Sandbox) -> Result<()> {
         .with_context(|| format!("cannot write {}", sb.agent_pidfile().display()))?;
 
     for key in &keys {
-        let ok = as_user(sb, "ssh-add")
-            .env("SSH_AUTH_SOCK", &sock)
-            .arg("-c")
+        let mut add = as_user(sb, "ssh-add");
+        add.env("SSH_AUTH_SOCK", &sock);
+        if sb.cfg.ssh_keys_confirm {
+            add.arg("-c");
+        }
+        let ok = add
             .arg(key)
             .status()
             .with_context(|| format!("cannot run ssh-add for {}", key.display()))?
