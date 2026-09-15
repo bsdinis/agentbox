@@ -286,19 +286,19 @@ check 'registers with machined'  "$(machinectl list --no-legend 2>/dev/null | aw
 check 'the settings file applied to the booted box' \
   "$(sudo systemd-run -M "$LBOX" --pipe --quiet --wait /usr/bin/hostname 2>/dev/null)" "$LBOX"
 
-# The base image is the lower layer of every mounted box, and overlayfs does
-# not tolerate a lower layer changing underneath a live box: the box goes on
-# serving the view it cached, so a package the refresh adds can end up
-# half-visible - listed by readdir, ENOENT on open. `build` has to refuse while
-# this box is up. Aimed at a decoy state directory holding a stand-in for the
-# box, so refusing is the only thing this can do to anything that matters: were
-# the guard gone, the refresh would rewrite the empty decoy, not the real image.
-DSTATE="$(mktemp -d "$root/agentbox-decoystate-XXXXXX")"
-sudo mkdir -p "$DSTATE/base/usr" "$DSTATE/boxes/$LBOX"
-check 'build refuses to change the image under a running box' \
-  "$(sudo env AGENTBOX_STATE="$DSTATE" "$AGENTBOX" build --refresh 2>&1 |
-     grep -c 'running on the base image')" 1
-sudo rm -rf "$DSTATE"
+# Stale check removed: this used to assert that `build` *refuses* while a box
+# is running, back when the base image was one mutable directory that a
+# refresh rewrote in place. Since the generations refactor (see base.rs's
+# module doc), `build`/`--refresh` write to a brand new `bases/<id>/` and only
+# repoint `bases/current` once done - a live box's overlay keeps its lowerdir
+# open on the old generation, untouched, for the life of the mount, so there is
+# nothing left to refuse. The decoy state dir this used (a lone `base/`
+# directory) predates that refactor too and has no `bases/current` to find, so
+# `build --refresh` against it fell through to bootstrapping a whole new
+# generation from scratch - slow, unconditionally, on every verify.sh run,
+# which is exactly what WITH_BUILD exists to gate. The actual guarantee (a
+# build never touches a running box's generation) is exercised by section 10
+# instead, under WITH_BUILD.
 
 "$AGENTBOX" down "$LIMITS" >/dev/null 2>&1
 for _ in $(seq 60); do
@@ -448,6 +448,11 @@ network = "host"
 cpy = ["$CPYSRC"]
 TOML
 cpy() { "$AGENTBOX" run "$CPY" -- "$@"; }
+# A fresh box's first launch also runs the one-time login-shell setup (chsh),
+# which prints straight to this same stdout; warm it up first so that noise
+# lands here instead of in the first real check's captured output, same as
+# $PROJ/$LIMITS/$NAT above.
+cpy true >/dev/null 2>&1
 check 'first boot copies the host source in' \
   "$(cpy cat "$CPYSRC/seed.txt")" 'seed-v1'
 cpy sh -c "echo edited > $CPYSRC/seed.txt"
@@ -486,13 +491,18 @@ network = "host"
 ssh_keys = ["$SSHKEYDIR/id_ed25519"]
 TOML
   sshbox() { "$AGENTBOX" run "$SSH" -- "$@"; }
+  # `run` alone is Session-owned and powers the box off - agent, relay and
+  # all - the moment its one-shot session ends, which is immediately after
+  # each `sshbox` call below returns. `up` first keeps it running underneath
+  # them, the way an interactive `shell` session would, so the host-side
+  # process checks below see it still alive rather than already torn down.
+  "$AGENTBOX" up "$SSH" >/dev/null 2>&1
+  SSHBOXNAME="$("$AGENTBOX" status "$SSH" | awk '/^box /{print $2}')"
   check 'the box-scoped agent serves the configured key' \
     "$(sshbox sh -c 'ssh-add -l 2>&1' | grep -c 'agentbox-verify')" 1
   check 'SSH_AUTH_SOCK points at the forwarded socket' \
     "$(sshbox sh -c 'echo $SSH_AUTH_SOCK')" \
     "$(sshbox sh -c 'echo $HOME/.agentbox/ssh-agent.sock')"
-
-  SSHBOXNAME="$("$AGENTBOX" status "$SSH" | awk '/^box /{print $2}')"
   check 'a host-side agent is running for the box' \
     "$(pgrep -f "ssh-agent -s -a .*/boxes/$SSHBOXNAME/ssh-agent/agent\.sock" | wc -l)" 1
   check 'a host-side relay is running for the box' \
