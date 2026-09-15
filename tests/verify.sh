@@ -32,6 +32,8 @@ LIMITS="$(mktemp -d "$root/agentbox-limits-XXXXXX")"
 NAT="$(mktemp -d "$root/agentbox-nat-XXXXXX")"
 CPY="$(mktemp -d "$root/agentbox-cpy-XXXXXX")"
 CPYSRC="$(mktemp -d "$root/agentbox-cpysrc-XXXXXX")"
+SSH="$(mktemp -d "$root/agentbox-ssh-XXXXXX")"
+SSHKEYDIR="$(mktemp -d "$root/agentbox-sshkeys-XXXXXX")"
 BSTATE=""
 FAKE=""
 pass=0 fail=0
@@ -49,7 +51,8 @@ cleanup() {
   "$AGENTBOX" rm "$LIMITS" -y >/dev/null 2>&1
   "$AGENTBOX" rm "$NAT" -y >/dev/null 2>&1
   "$AGENTBOX" rm "$CPY" -y >/dev/null 2>&1
-  rm -rf "$PROJ" "$REF" "$LIMITS" "$NAT" "$CPY" "$CPYSRC"
+  "$AGENTBOX" rm "$SSH" -y >/dev/null 2>&1
+  rm -rf "$PROJ" "$REF" "$LIMITS" "$NAT" "$CPY" "$CPYSRC" "$SSH" "$SSHKEYDIR"
   # The throwaway image is owned by the shifted container UIDs, so it needs root.
   [[ -n "$FAKE" ]] && sudo rm -rf "$FAKE"
   [[ -n "$BSTATE" ]] && sudo rm -rf "$BSTATE"
@@ -463,6 +466,54 @@ check 'a later host rewrite is not resynced into the box' \
 "$AGENTBOX" reset "$CPY" -y >/dev/null 2>&1
 check 'reset makes the destination absent again' \
   "$(cpy cat "$CPYSRC/seed.txt")" 'seed-v2'
+
+echo
+echo '--- 13. ssh_keys: a dedicated agent behind a relay ---'
+# Regression test for a box's own user namespace defeating a naive bind: a box
+# process's real, host-global UID is uid_base + <its in-box uid>, never the
+# invoking user's actual UID - owneridmap only translates file ownership
+# metadata (what stat/ls see), not process credentials. ssh-agent checks the
+# connecting peer's real UID via getsockopt(SO_PEERCRED) and closes the
+# connection if it doesn't match its own, so binding the agent's own socket
+# straight into the box makes every ssh-add there die with SIGPIPE
+# ("communication with agent failed") even though the socket and its
+# permissions look entirely correct. See nspawn::spawn_ssh_agent for the fix:
+# a socat relay, run as the same user as the agent, sits in front of it.
+if command -v socat >/dev/null 2>&1; then
+  ssh-keygen -q -t ed25519 -N '' -C 'agentbox-verify' -f "$SSHKEYDIR/id_ed25519" </dev/null
+  cat > "$SSH/.agentbox.toml" <<TOML
+network = "host"
+ssh_keys = ["$SSHKEYDIR/id_ed25519"]
+TOML
+  sshbox() { "$AGENTBOX" run "$SSH" -- "$@"; }
+  check 'the box-scoped agent serves the configured key' \
+    "$(sshbox sh -c 'ssh-add -l 2>&1' | grep -c 'agentbox-verify')" 1
+  check 'SSH_AUTH_SOCK points at the forwarded socket' \
+    "$(sshbox sh -c 'echo $SSH_AUTH_SOCK')" \
+    "$(sshbox sh -c 'echo $HOME/.agentbox/ssh-agent.sock')"
+
+  SSHBOXNAME="$("$AGENTBOX" status "$SSH" | awk '/^box /{print $2}')"
+  check 'a host-side agent is running for the box' \
+    "$(pgrep -f "ssh-agent -s -a .*/boxes/$SSHBOXNAME/ssh-agent/agent\.sock" | wc -l)" 1
+  check 'a host-side relay is running for the box' \
+    "$(pgrep -f "socat UNIX-LISTEN:.*/boxes/$SSHBOXNAME/ssh-agent/agent-relay\.sock" | wc -l)" 1
+
+  "$AGENTBOX" down "$SSH" >/dev/null 2>&1
+  for _ in $(seq 20); do
+    pgrep -f "ssh-agent -s -a .*/boxes/$SSHBOXNAME/ssh-agent/agent\.sock" >/dev/null 2>&1 || break
+    sleep 0.25
+  done
+  check 'down stops the host-side agent' \
+    "$(pgrep -f "ssh-agent -s -a .*/boxes/$SSHBOXNAME/ssh-agent/agent\.sock" | wc -l)" 0
+  check 'down stops the relay too' \
+    "$(pgrep -f "socat UNIX-LISTEN:.*/boxes/$SSHBOXNAME/ssh-agent/agent-relay\.sock" | wc -l)" 0
+
+  sshbox true >/dev/null 2>&1
+  check 'a fresh boot after down still serves the key' \
+    "$(sshbox sh -c 'ssh-add -l 2>&1' | grep -c 'agentbox-verify')" 1
+else
+  skip 'ssh_keys (socat not installed on this host)'
+fi
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [[ -n "${KEEP:-}" ]] && printf 'kept: %s (agentbox rm %s)\n' "$BOXNAME" "$BOXNAME"
