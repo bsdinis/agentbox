@@ -13,8 +13,11 @@
 #   KEEP=1 ~/dev/agentbox/tests/verify.sh       # keep the box for poking at
 #   WITH_BUILD=1 ~/dev/agentbox/tests/verify.sh # also exercise `agentbox build`
 #
-# WITH_BUILD is opt-in because it builds a second Arch image from scratch (a few
-# minutes, ~3G, and it downloads whatever the host package cache is missing). It
+# WITH_BUILD is opt-in because it builds a second base image from scratch (a few
+# minutes, ~3G, and it downloads whatever the host does not already have
+# cached) - the same distribution `agentbox build` picks for this host, Arch
+# via pacman or Debian/Ubuntu via debootstrap, so this covers whichever
+# bootstrap path is actually in use here. It
 # is the only section that covers the build path, which is where a mount
 # propagation bug once unmounted /dev/pts and /run/user/$UID off the host. It
 # builds into a throwaway AGENTBOX_STATE, so the real base image is never
@@ -24,6 +27,11 @@ set -uo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 AGENTBOX="${AGENTBOX_BIN:-$(command -v agentbox || echo "$here/../target/release/agentbox")}"
 [[ -x "$AGENTBOX" ]] || { echo "no agentbox binary; run 'cargo build --release' or 'cargo install --path .' first" >&2; exit 1; }
+# Absolutise it. Section 10 runs the build from a scratch directory to prove it
+# writes nothing there, and the documented invocation passes a relative
+# AGENTBOX_BIN (`AGENTBOX_BIN=target/release/agentbox tests/verify.sh`), which
+# stops resolving the moment anything cd's - as an exit 127 several minutes in.
+AGENTBOX="$(cd "$(dirname "$AGENTBOX")" && pwd)/$(basename "$AGENTBOX")"
 root="${AGENTBOX_VERIFY_ROOT:-${XDG_CACHE_HOME:-$HOME/.cache}/agentbox-verify}"
 mkdir -p "$root" || { echo "cannot create $root" >&2; exit 1; }
 PROJ="$(mktemp -d "$root/agentbox-verify-XXXXXX")"
@@ -53,6 +61,7 @@ cleanup() {
   "$AGENTBOX" rm "$CPY" -y >/dev/null 2>&1
   "$AGENTBOX" rm "$SSH" -y >/dev/null 2>&1
   rm -rf "$PROJ" "$REF" "$LIMITS" "$NAT" "$CPY" "$CPYSRC" "$SSH" "$SSHKEYDIR"
+  [[ -n "${cwdprobe:-}" ]] && rm -rf "$cwdprobe"
   # The throwaway image is owned by the shifted container UIDs, so it needs root.
   [[ -n "$FAKE" ]] && sudo rm -rf "$FAKE"
   [[ -n "$BSTATE" ]] && sudo rm -rf "$BSTATE"
@@ -119,13 +128,45 @@ check 'project mounted at its real host path' "$(box pwd)" "$PROJ"
 check 'runs as the host user'                 "$(box id -un)" "$USER"
 check 'same uid as on the host'               "$(box id -u)"  "$(id -u)"
 
+# The image follows the host (src/distro.rs), so everything below that names a
+# package manager or a package has to follow the image. Read it from the box
+# rather than from the host: that is the thing under test, and a box built
+# against an older generation can legitimately differ from what this host
+# would build today.
+case " $(box sh -c '. /etc/os-release 2>/dev/null; echo "${ID:-} ${ID_LIKE:-}"') " in
+  *" arch "*) PKG=pacman ;;
+  *" debian "*|*" ubuntu "*) PKG=apt ;;
+  *) PKG=unknown ;;
+esac
+printf 'guest package manager: %s\n' "$PKG"
+install_in_box() {
+  case "$PKG" in
+    pacman) box sudo pacman -Sy --noconfirm --needed "$@" ;;
+    apt)    box sudo env DEBIAN_FRONTEND=noninteractive \
+              apt-get install -y --no-install-recommends "$@" ;;
+    *)      return 1 ;;
+  esac
+}
+
+# The canary package used below to prove that an install persists, survives a
+# remount and is undone by `reset`. `cowsay` is in both archives, but Debian
+# puts it in /usr/games, which is not on the PATH nspawn hands a payload (only
+# a *login* shell picks it up, via Debian's /etc/profile) - so the command has
+# to be named by path there or every check reads as "not installed" while the
+# package is in fact present and working.
+CANARY=cowsay
+case "$PKG" in
+  apt) CANARY_CMD=/usr/games/cowsay ;;
+  *)   CANARY_CMD=cowsay ;;
+esac
+
 echo
 echo '--- 1. package installation inside the box ---'
-box sudo pacman -Sy --noconfirm --needed cowsay >/dev/null 2>&1
-installed() { box sh -c 'command -v cowsay >/dev/null && echo installed || echo gone'; }
-check 'pacman installed a package' "$(installed)" installed
-check 'the package actually runs'  "$(box sh -c 'cowsay moo | grep -c moo')" 1
-check 'host is unaffected'         "$(command -v cowsay || echo none)" none
+install_in_box "$CANARY" >/dev/null 2>&1
+installed() { box sh -c "command -v $CANARY_CMD >/dev/null && echo installed || echo gone"; }
+check "$PKG installed a package" "$(installed)" installed
+check 'the package actually runs'  "$(box sh -c "$CANARY_CMD moo | grep -c moo")" 1
+check 'host is unaffected'         "$(command -v "$CANARY" || echo none)" none
 
 # A remount is the cure for a box whose image moved underneath it, and it is
 # only usable as a cure if it costs the box nothing: its writes live in `upper`
@@ -159,7 +200,6 @@ check 'unmapped host directories are invisible' \
 echo
 echo '--- 3. git and jj ---'
 check 'git present'               "$(box sh -c 'git --version | cut -d" " -f1-2')" 'git version'
-check 'jj present'                "$(box sh -c 'jj --version | cut -d" " -f1')" 'jj'
 check 'host git identity applies' "$(box git config --get user.email)" "$(git config --get user.email)"
 box sh -c 'git init -q . && echo hello > file.txt && git add file.txt &&
            git -c commit.gpgsign=false commit -qm "from inside the box"' >/dev/null 2>&1
@@ -169,13 +209,23 @@ check 'file written in the box is owned by you on the host' \
   "$(stat -c %U "$PROJ/file.txt" 2>/dev/null)" "$USER"
 check 'git sees no dubious ownership' \
   "$(box sh -c 'git status --porcelain=v1 >/dev/null 2>&1 && echo clean || echo error')" clean
-box sh -c 'jj git init --colocate . >/dev/null 2>&1 && jj st >/dev/null 2>&1 && echo ok' >/dev/null 2>&1
-check 'jj works on the mapped repo' \
-  "$(box sh -c 'jj st >/dev/null 2>&1 && echo ok || echo err')" ok
-box sh -c 'jj new -m "made by jj inside the box"' >/dev/null 2>&1
-check 'jj operation from the box is visible on the host' \
-  "$(jj -R "$PROJ" log -r 'all()' --no-graph -T 'description.first_line() ++ "\n"' \
-     2>/dev/null | grep -c 'made by jj inside the box')" 1
+# jj is in the Arch image's package list but in no Debian stable release or
+# Ubuntu archive, so a Debian-family box legitimately has none
+# (DEFAULT_BASE_PACKAGES_DEBIAN, and docs/setup.md says so). Skip rather than
+# fail: what these cover is that a VCS writing through the owneridmap'd project
+# dir lands on the host, and the git checks above already assert that.
+if [[ "$(box sh -c 'command -v jj >/dev/null && echo yes || echo no')" == yes ]]; then
+  check 'jj present'                "$(box sh -c 'jj --version | cut -d" " -f1')" 'jj'
+  box sh -c 'jj git init --colocate . >/dev/null 2>&1 && jj st >/dev/null 2>&1 && echo ok' >/dev/null 2>&1
+  check 'jj works on the mapped repo' \
+    "$(box sh -c 'jj st >/dev/null 2>&1 && echo ok || echo err')" ok
+  box sh -c 'jj new -m "made by jj inside the box"' >/dev/null 2>&1
+  check 'jj operation from the box is visible on the host' \
+    "$(jj -R "$PROJ" log -r 'all()' --no-graph -T 'description.first_line() ++ "\n"' \
+       2>/dev/null | grep -c 'made by jj inside the box')" 1
+else
+  skip "jj is not in this guest's image ($PKG has no jujutsu package); git above covers the same path"
+fi
 
 echo
 echo '--- 4. read-write and read-only mapping ---'
@@ -310,38 +360,50 @@ check 'powers off' "$(systemctl is-active "$SERVICE" 2>/dev/null)" inactive
 echo
 echo '--- 7. network modes ---'
 check 'host networking reaches the network' \
-  "$(box sh -c 'getent hosts archlinux.org >/dev/null 2>&1 && echo up || echo down')" up
+  "$(box sh -c 'getent hosts example.com >/dev/null 2>&1 && echo up || echo down')" up
 check 'network = none exposes only loopback' \
   "$("$AGENTBOX" run "$PROJ" --network none -- \
      sh -c 'ls /sys/class/net | xargs echo' 2>/dev/null)" lo
 check 'network = none cannot resolve' \
   "$("$AGENTBOX" run "$PROJ" --network none -- \
-     sh -c 'getent hosts archlinux.org >/dev/null 2>&1 && echo up || echo down' 2>/dev/null)" down
+     sh -c 'getent hosts example.com >/dev/null 2>&1 && echo up || echo down' 2>/dev/null)" down
 
 # nat gives the box its own network namespace; it must still reach the internet
 # through the host's NAT, and a fresh box's `packages` must install after boot.
-# nat needs host setup - systemd-networkd managing the container veth (see
-# docs/setup.md). Where that is missing (a NetworkManager host without the
-# drop-in) a nat box has no default route; skip with a pointer rather than
-# failing the suite on a host-config gap. `bash`'s /dev/tcp needs no extra tool.
-if [[ "$("$AGENTBOX" run "$PROJ" --network nat -- \
-        sh -c 'ip -4 route show default 2>/dev/null | grep -c default' 2>/dev/null)" != 0 ]]; then
+#
+# Both need host setup that agentbox cannot do for itself, and there are two
+# independent ways for it to be missing, so the gate probes the thing actually
+# required - a packet leaving the box - rather than any one precondition:
+#
+#   * no default route: NetworkManager still owns `ve-*`/`vz-*`, so networkd
+#     never DHCPs the veth and host0 stays link-local;
+#   * a route but no egress: Docker sets `iptables -P FORWARD DROP` and
+#     whitelists only `docker0`, so the box is addressed and routed and still
+#     reaches nothing.
+#
+# Skip with a pointer either way rather than failing the suite on a host-config
+# gap. The probe is by IP, resolved here on the host, so that it answers
+# "can a packet get out" and not "does DNS work" - which is the next check's
+# job. `bash`'s /dev/tcp needs no extra tool in the box.
+natprobe="$(getent hosts example.com | awk '{print $1; exit}')"
+if [[ -n "$natprobe" ]] && "$AGENTBOX" run "$PROJ" --network nat -- \
+     bash -c "exec 3<>/dev/tcp/$natprobe/443" >/dev/null 2>&1; then
   check 'network = nat resolves a name' \
     "$("$AGENTBOX" run "$PROJ" --network nat -- \
-       sh -c 'getent hosts archlinux.org >/dev/null 2>&1 && echo up || echo down' 2>/dev/null)" up
+       sh -c 'getent hosts example.com >/dev/null 2>&1 && echo up || echo down' 2>/dev/null)" up
   check 'network = nat opens an outbound connection' \
     "$("$AGENTBOX" run "$PROJ" --network nat -- \
-       bash -c 'exec 3<>/dev/tcp/archlinux.org/443 && echo ok || echo fail' 2>/dev/null)" ok
+       bash -c 'exec 3<>/dev/tcp/example.com/443 && echo ok || echo fail' 2>/dev/null)" ok
   cat > "$NAT/.agentbox.toml" <<TOML
 network = "nat"
-packages = ["cowsay"]
+packages = ["$CANARY"]
 TOML
   "$AGENTBOX" run "$NAT" -- true >/dev/null 2>&1
   check 'a fresh nat box installs its packages after boot' \
     "$("$AGENTBOX" run "$NAT" -- \
-       sh -c 'command -v cowsay >/dev/null && echo installed || echo gone' 2>/dev/null)" installed
+       sh -c "command -v $CANARY_CMD >/dev/null && echo installed || echo gone" 2>/dev/null)" installed
 else
-  skip 'network = nat connectivity (no route for nat on this host; configure systemd-networkd / NetworkManager - see docs/setup.md)'
+  skip 'network = nat connectivity (nothing gets out of a nat box on this host: no route, or a FORWARD DROP policy from Docker - see docs/setup.md, "nat networking")'
   skip 'a fresh nat box installs its packages after boot (nat not reachable on this host)'
 fi
 
@@ -402,34 +464,73 @@ if [[ -n "${WITH_BUILD:-}" ]]; then
     # isolation here is load-bearing: snapshot the real image and prove the
     # build never reached it.
     realbase="$(stat -c '%i %Y' /var/lib/agentbox/base 2>/dev/null || echo absent)"
+    # Run the build from a directory of our own, and prove it stays empty. Every
+    # stage of a build runs as root, so anything a child writes relative to the
+    # cwd becomes a root-owned file in whatever directory the user typed
+    # `agentbox build` in - a git repo, usually, where they cannot even be
+    # deleted without sudo. debootstrap's internal wget did exactly that,
+    # leaving `wget-log`, `wget-log.1`, ... behind. No other section would
+    # notice.
+    #
     # `sudo env VAR=...` rather than `sudo VAR=...`: the latter is refused by
     # default sudoers. Running the build already-root means AGENTBOX_STATE is
     # read from this process rather than being stripped on the way through sudo.
-    sudo env AGENTBOX_STATE="$BSTATE" "$AGENTBOX" build --force >"$buildlog" 2>&1
+    cwdprobe="$(mktemp -d "$root/agentbox-cwd-XXXXXX")"
+    ( cd "$cwdprobe" && sudo env AGENTBOX_STATE="$BSTATE" "$AGENTBOX" build --force ) \
+      >"$buildlog" 2>&1
     rc=$?
     check 'build succeeded' "$rc" 0
     (( rc == 0 )) || { echo "--- tail of $buildlog ---"; tail -20 "$buildlog"; }
+    check 'the build wrote nothing into the directory it ran from' \
+      "$(ls -A "$cwdprobe" | wc -l)" 0
     check 'build left every host mount in place' "$(lost_mounts)" 'none lost'
     # The bootstrap rbinds /proc, /sys, /dev and /run into the half-built image
     # and tears them down again. Anything still mounted under it means either
     # the teardown failed or the guard refused to unmount a still-shared
     # subtree and left it behind deliberately - both worth knowing about.
     check 'the bootstrap binds were torn down' \
-      "$(findmnt -rno TARGET | awk -v p="$BSTATE/base/" 'index($0, p) == 1' | wc -l)" 0
+      "$(findmnt -rno TARGET | awk -v p="$BSTATE/bases/" 'index($0, p) == 1' | wc -l)" 0
     check 'the real base image was untouched' \
       "$(stat -c '%i %Y' /var/lib/agentbox/base 2>/dev/null || echo absent)" "$realbase"
-    check 'keyring was initialised' \
-      "$(sudo test -d "$BSTATE/base/etc/pacman.d/gnupg" && echo yes || echo no)" yes
-    check 'git is in the image'  "$(sudo test -x "$BSTATE/base/usr/bin/git" && echo yes || echo no)" yes
-    check 'jj is in the image'   "$(sudo test -x "$BSTATE/base/usr/bin/jj"  && echo yes || echo no)" yes
+    # Every generation lives in a directory of its own, named by `current`.
+    gen="$BSTATE/bases/$(sudo cat "$BSTATE/bases/current" 2>/dev/null)"
+    check 'the build stamped a current generation' \
+      "$(sudo test -d "$gen/usr" && echo yes || echo no)" yes
+    # What the guest is is the build's own decision, so read it back rather
+    # than assuming: the per-family stages differ, and only one of them ran.
+    guest="$(sudo sh -c ". '$gen/etc/os-release' 2>/dev/null; echo \${ID:-unknown}")"
+    check 'the generation is stamped with its distribution' \
+      "$(sudo cat "$gen.distro" 2>/dev/null)" \
+      "$(case "$guest" in arch) echo arch ;; *) echo debian ;; esac)"
+    if [[ "$guest" == arch ]]; then
+      check 'keyring was initialised' \
+        "$(sudo test -d "$gen/etc/pacman.d/gnupg" && echo yes || echo no)" yes
+      check 'jj is in the image' \
+        "$(sudo test -x "$gen/usr/bin/jj" && echo yes || echo no)" yes
+    else
+      # debootstrap leaves a one-component list with no -updates pocket behind;
+      # the image is only usable if the full list replaced it.
+      check 'the full archive list replaced the bootstrap one' \
+        "$(sudo test -f "$gen/etc/apt/sources.list.d/agentbox.sources" && echo yes || echo no)" yes
+      check 'the bootstrap archive list is gone' \
+        "$(sudo test -e "$gen/etc/apt/sources.list" && echo left || echo gone)" gone
+      # Without these the image boots to nothing and no session can attach.
+      check 'the image can boot' \
+        "$(sudo test -x "$gen/usr/lib/systemd/systemd" && echo yes || echo no)" yes
+      # policy-rc.d blocks service starts during the build only; left behind,
+      # it silently blocks them in every box forever.
+      check 'the build-time service block was removed' \
+        "$(sudo test -e "$gen/usr/sbin/policy-rc.d" && echo left || echo gone)" gone
+    fi
+    check 'git is in the image'  "$(sudo test -x "$gen/usr/bin/git" && echo yes || echo no)" yes
     check 'sudoers rule was written' \
-      "$(sudo test -f "$BSTATE/base/etc/sudoers.d/00-agentbox" && echo yes || echo no)" yes
+      "$(sudo test -f "$gen/etc/sudoers.d/00-agentbox" && echo yes || echo no)" yes
     # The image the crash left behind stopped just short of this, and every
     # later failure was a box whose chsh could not find the user.
     check 'the sandbox user is in the image' \
-      "$(sudo grep -c "^$USER:" "$BSTATE/base/etc/passwd" 2>/dev/null)" 1
+      "$(sudo grep -c "^$USER:" "$gen/etc/passwd" 2>/dev/null)" 1
     check 'image ownership was shifted out of the host root range' \
-      "$(sudo stat -c %u "$BSTATE/base/usr/bin/bash" 2>/dev/null)" "$UIDBASE"
+      "$(sudo stat -c %u "$gen/usr/bin/bash" 2>/dev/null)" "$UIDBASE"
   fi
 fi
 

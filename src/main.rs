@@ -1,11 +1,12 @@
 //! agentbox - per-project systemd-nspawn sandboxes for coding agents.
 //!
-//! * One shared Arch base image, pre-shifted on disk into an unprivileged UID
-//!   range, so a box needs no chown or ID-mapping work at start.
+//! * One shared base image - whichever distribution this host can bootstrap,
+//!   see `distro` - pre-shifted on disk into an unprivileged UID range, so a
+//!   box needs no chown or ID-mapping work at start.
 //! * Each project gets an overlayfs on top of it: lower is the shared base,
 //!   upper holds every write the box makes, merged at /var/lib/machines/<box>.
-//!   `pacman -S`, `sudo` and /home writes persist per project and cost only
-//!   the diff.
+//!   Installed packages, `sudo` and /home writes persist per project and cost
+//!   only the diff.
 //! * A user namespace maps container UID 0 to an unprivileged host UID, so
 //!   root inside the box cannot touch the host.
 //! * Host directories are bound with `owneridmap`, which maps the host owner
@@ -16,6 +17,7 @@
 mod base;
 mod cmds;
 mod config;
+mod distro;
 mod host;
 mod nspawn;
 mod sandbox;

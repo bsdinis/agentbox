@@ -7,7 +7,7 @@
 | systemd 256 or newer | needs the `owneridmap` bind option and `PrivateUsersOwnership=` | `systemctl --version` |
 | Linux 5.12 or newer | ID-mapped mounts | `uname -r` |
 | `systemd-container` package | provides `systemd-nspawn`, `machinectl` | `which systemd-nspawn` |
-| `pacman` on the host | the base image is bootstrapped with it | Arch and derivatives only |
+| `pacman` or `debootstrap` on the host | the base image is bootstrapped with one of them | Arch has `pacman`; on Debian/Ubuntu, `apt-get install debootstrap` |
 | A Rust toolchain, to build | `agentbox` is a small Rust binary; nothing is needed at run time | `cargo --version` |
 | A filesystem supporting ID-mapped mounts under your code | ext4, xfs, btrfs, f2fs all work | `findmnt -T ~` |
 | `sudo` | `agentbox` re-execs itself as root | — |
@@ -16,11 +16,43 @@
 The host does **not** need `systemd-networkd`, `arch-install-scripts`, or
 `btrfs`. Network mode `nat` is the one exception — see below.
 
-Non-Arch hosts: everything except `agentbox build` is distribution-agnostic.
-To run on Debian/Fedora, replace `bootstrap()` in `src/base.rs` with
-`debootstrap`/`dnf --installroot` and adjust `DEFAULT_BASE_PACKAGES` in
-`src/config.rs`. Nothing else in the tool knows which distribution is inside
-the box.
+Note that systemd 256 is a hard floor, and a common thing to be short of:
+Ubuntu 24.04 LTS ships systemd 255, which has no `owneridmap`, so boxes cannot
+start there. Ubuntu 24.10 and later and Debian trixie are new enough.
+`install-deps.sh` checks and says so.
+
+## Which distribution is inside the box
+
+The guest follows the host, because the host is what bootstraps it:
+
+| Host | Guest | Bootstrapped with |
+| --- | --- | --- |
+| Arch (or a derivative: `ID_LIKE=arch`) | Arch | the host's own `pacman --root`, reusing its package cache and keyring |
+| Debian | the same Debian release | `debootstrap --variant=minbase` |
+| Ubuntu (or a derivative: `ID_LIKE=debian`) | the same Ubuntu release | `debootstrap --variant=minbase` |
+
+The release, the mirror and the components are read off the host — the mirror
+from the host's own `/etc/apt/sources.list`(`.d/<id>.sources`), so a build
+reuses whatever mirror you already chose — and every one of them can be
+overridden under `[base]` in the global config
+([configuration.md](configuration.md#the-base-image)). Nothing but
+`agentbox build` cares: once an image exists, the overlay, the bind plan, the
+UID shift and the session machinery are the same whatever is inside it, and a
+box's own `/etc/os-release` is what later commands consult when they need to
+install a package into it.
+
+Two differences are worth knowing before you use a Debian-family box:
+
+* **`jj` is not in it.** Jujutsu is packaged in Debian unstable only, and not
+  in Ubuntu at all, so it is absent from the built-in package list — a name
+  that does not resolve would fail the whole build. Add it per project with
+  `packages`, or install it inside the box.
+* **`fd` is `fdfind`** on Debian, which renames it to avoid a clash. The image
+  symlinks it back to `fd` in `/usr/local/bin`.
+
+To add a third family, implement it in `src/distro.rs`: a bootstrap, a package
+list, an install/upgrade command and a setup script. That module is the only
+place in the tool that knows what a distribution is.
 
 ## nat networking
 
@@ -45,6 +77,22 @@ still reaches the internet, through the host, which needs two things:
        | sudo tee /etc/NetworkManager/conf.d/agentbox-nspawn.conf
    $ sudo systemctl reload NetworkManager
    ```
+
+3. **If Docker is installed, its `FORWARD` policy has to stop dropping the
+   box's traffic.** Docker sets `iptables -P FORWARD DROP` and then whitelists
+   only its own `docker0`, so a nat box gets an address and a default route
+   from networkd and still cannot reach anything — masquerading is fine, the
+   packets never get past `FORWARD`. `sudo iptables -S FORWARD | head -1` shows
+   the policy; the narrow fix is to accept the container bridge explicitly:
+
+   ```console
+   $ sudo iptables -I DOCKER-USER -i ve-+ -j ACCEPT
+   $ sudo iptables -I DOCKER-USER -o ve-+ -j ACCEPT
+   ```
+
+   `DOCKER-USER` is the chain Docker leaves for exactly this and never
+   rewrites, but the rules are not persistent on their own — add them to
+   whatever restores your firewall at boot.
 
 If a nat box comes up without a route, `agentbox` warns on launch and points
 here. Without this setup, use `network = "host"` (shares the host's stack - note
@@ -110,16 +158,30 @@ $ agentbox build
 
 One-time, a few minutes, and every project shares the result. The stages are:
 
-1. **Bootstrap** — `pacman --root /var/lib/agentbox/bases/<id> -Sy base archlinux-keyring`,
-   using the host's package cache and keyring, with `/proc`, `/sys`, `/dev` and
-   `/run` bind mounted so install scriptlets work. This is what
-   `pacstrap` does; doing it inline avoids depending on `arch-install-scripts`.
-2. **Keyring** — `pacman-key --init && pacman-key --populate archlinux` *inside*
-   the image, so the box can install and verify packages on its own later.
-3. **Packages** — the full `base_packages` list, installed from inside the image.
-4. **Configure** — locale, `/etc/pacman.conf` colour and parallel downloads, a
-   sandbox user mirroring your host username/UID/GID, `%wheel NOPASSWD` in
-   `/etc/sudoers.d/00-agentbox`, and an empty `/etc/machine-id`.
+1. **Bootstrap** — the one stage that runs on the host, because there is
+   nothing inside the image yet to run anything.
+   On Arch: `pacman --root /var/lib/agentbox/bases/<id> -Sy base
+   archlinux-keyring`, using the host's package cache and keyring, with
+   `/proc`, `/sys`, `/dev` and `/run` mounted so install scriptlets work. This
+   is what `pacstrap` does; doing it inline avoids depending on
+   `arch-install-scripts`.
+   On Debian/Ubuntu: `debootstrap --variant=minbase --components=…
+   --include=ca-certificates <suite> <dir> <mirror>`, which does its own chroot
+   setup and teardown, followed by writing the real archive list
+   (`/etc/apt/sources.list.d/agentbox.sources`, with the `-updates` and
+   `-security` pockets debootstrap leaves out) in place of the stub one.
+2. **Keyring** — Arch only: `pacman-key --init && pacman-key --populate
+   archlinux` *inside* the image, so the box can install and verify packages on
+   its own later. debootstrap installs the archive keyring as part of stage 1.
+3. **Packages** — the full `base_packages` list, installed from inside the
+   image (`pacman -Sy`, or `apt-get install --no-install-recommends` with
+   `policy-rc.d` blocking service starts — there is no init inside a
+   half-built image for a maintainer script to talk to).
+4. **Configure** — locale, a sandbox user mirroring your host
+   username/UID/GID, `NOPASSWD` for the distribution's admin group (`%wheel` on
+   Arch, `%sudo` on Debian) in `/etc/sudoers.d/00-agentbox`, an empty
+   `/etc/machine-id`, and whatever else that family wants (pacman colour and
+   parallel downloads; `/etc/default/locale` and the `fd` symlink on Debian).
 5. **Shift** — one recursive `chown` of the whole image into the container UID
    range (`systemd-nspawn --private-users-ownership=chown`). This is the reason
    starting a box afterwards is instant: the on-disk ownership already matches
@@ -129,7 +191,7 @@ One-time, a few minutes, and every project shares the result. The stages are:
 Useful variants:
 
 ```console
-$ agentbox build --refresh    # pacman -Syu a copy of the current image
+$ agentbox build --refresh    # upgrade a copy of the current image in place
 $ agentbox build --force      # bootstrap a brand new one from scratch
 ```
 
@@ -191,11 +253,16 @@ Two things to know before editing that list:
 
 * **It replaces the built-in one rather than adding to it** — unlike every
   other list in the configuration. Whatever you write is the whole image, so
-  start from `DEFAULT_BASE_PACKAGES` in `src/config.rs` and add to it. A short
+  start from `DEFAULT_BASE_PACKAGES` (or `DEFAULT_BASE_PACKAGES_DEBIAN`, for a
+  Debian-family image) in `src/config.rs` and add to it — both are reproduced
+  in `config.example.toml`. A short
   list costs nothing on `--refresh`, which only ever installs and upgrades, but
   it is the entire image the next time you `--force`.
-* **A refresh is a `pacman -Syu`**, so it upgrades everything already in the
-  image, not only what you added.
+* **A refresh is a full upgrade** (`pacman -Syu`, or `apt-get dist-upgrade`),
+  so it upgrades everything already in the image, not only what you added. It
+  follows the generation it copies rather than what this host would build
+  today, so it never changes the distribution inside the image — only
+  `--force` does that.
 
 An existing box keeps any file it had already modified, since that copy lives
 in its own overlay. `agentbox reset <box>` if you want one to pick the new

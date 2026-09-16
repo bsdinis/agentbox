@@ -250,6 +250,7 @@ pub struct Sh {
     quiet: bool,
     silent: bool,
     allow_fail: bool,
+    cwd: Option<PathBuf>,
 }
 
 pub fn sh(argv: Vec<OsString>) -> Sh {
@@ -258,6 +259,7 @@ pub fn sh(argv: Vec<OsString>) -> Sh {
         quiet: false,
         silent: false,
         allow_fail: false,
+        cwd: None,
     }
 }
 
@@ -280,6 +282,18 @@ impl Sh {
         self
     }
 
+    /// Run with this working directory instead of inheriting the caller's.
+    ///
+    /// Everything here runs as root after the sudo re-exec, and the inherited
+    /// cwd is whatever directory the user typed the command in - so a child
+    /// that writes a file relative to `.` drops a root-owned file into the
+    /// user's own project. `debootstrap` does exactly that: its internal
+    /// `wget` leaves a `wget-log` behind in the cwd.
+    pub fn cwd(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.cwd = Some(dir.into());
+        self
+    }
+
     fn rendered(&self) -> String {
         render(&self.argv)
     }
@@ -287,6 +301,9 @@ impl Sh {
     fn build(&self) -> Command {
         let mut cmd = Command::new(&self.argv[0]);
         cmd.args(&self.argv[1..]);
+        if let Some(dir) = &self.cwd {
+            cmd.current_dir(dir);
+        }
         if self.silent {
             cmd.stdout(Stdio::null()).stderr(Stdio::null());
         }

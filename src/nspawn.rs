@@ -14,6 +14,7 @@ use anyhow::{bail, Context, Result};
 
 use crate::argv;
 use crate::config::{Network, BACKGROUND_AUTO, PROJECT_FILE, UID_RANGE};
+use crate::distro;
 use crate::host::{dry_run, env_var, host, sh};
 use crate::sandbox::{overbroad_reason, Bind, Sandbox, MACHINES, NSPAWN_DIR, UNIT_DIR};
 use crate::{base, info};
@@ -340,9 +341,27 @@ pub fn settings_text(sb: &Sandbox) -> Result<String> {
     out.push_str(&format!("Hostname={hostname}\n"));
     out.push_str("Timezone=copy\n");
     out.push_str("LinkJournal=no\n");
+    // `replace-host`, not `copy-host`: the two differ only in what they do
+    // when the image already has an `/etc/resolv.conf` that is not a regular
+    // file, and `copy-host` in that case does *nothing at all*, silently.
+    // Debian's `systemd-resolved` package points `/etc/resolv.conf` at
+    // `../run/systemd/resolve/stub-resolv.conf` in its postinst, so a
+    // Debian-family image ships exactly that symlink - and `/run` is a fresh
+    // tmpfs in every box, so it dangles. In `host` mode, where resolved is
+    // masked (it would reconfigure the host's own interfaces), nothing ever
+    // creates the file it points at, and the box has no resolver at all: every
+    // name lookup fails and `apt-get install` fails with it. Arch hid this for
+    // as long as it was the only guest, because its image ships a regular
+    // file there and `copy-host` was free to overwrite it.
+    //
+    // `replace-host` replaces the inode whatever it is, so the box gets the
+    // host's resolver config in both modes that have a network. It stays a
+    // copy rather than a bind so a box may still edit its own DNS config, and
+    // `127.0.0.53` in it resolves against whichever resolved owns the box's
+    // network namespace - the host's under `host`, the box's own under `nat`.
     out.push_str(match sb.cfg.network {
         Network::None => "ResolvConf=off\n",
-        _ => "ResolvConf=copy-host\n",
+        _ => "ResolvConf=replace-host\n",
     });
     if let Some(families) = address_families(sb) {
         out.push_str(&format!("RestrictAddressFamilies={families}\n"));
@@ -616,9 +635,13 @@ pub fn create(sb: &Sandbox) -> Result<bool> {
 /// session uses, once `wait_attachable`/`canary` have shown the box is up.
 ///
 /// Gated on `fresh`, so it is a one-time step on creation like the login-shell
-/// bootstrap it moved out of. A non-zero `pacman` exit is fatal: a box missing
-/// its configured packages is broken, and continuing would surface later as a
+/// bootstrap it moved out of. A non-zero exit is fatal: a box missing its
+/// configured packages is broken, and continuing would surface later as a
 /// confusing "not found" for whatever those packages were meant to provide.
+///
+/// Which package manager to drive is read from the box's own rootfs rather
+/// than from what this host would build today, so a box created against an
+/// older generation keeps working after the host's image changes family.
 pub fn install_packages(sb: &Sandbox, fresh: bool) -> Result<()> {
     if !fresh || dry_run() || sb.cfg.packages.is_empty() {
         return Ok(());
@@ -627,16 +650,16 @@ pub fn install_packages(sb: &Sandbox, fresh: bool) -> Result<()> {
         "installing packages: {}",
         sb.cfg.packages.join(" ")
     ));
-    let mut cmd = argv!["/usr/bin/pacman", "-Sy", "--noconfirm", "--needed"];
-    cmd.extend(sb.cfg.packages.iter().map(crate::host::oss));
-    let code = attach(sb, cmd, "root", "/")?;
+    let family = distro::family_of_root(&sb.root())?;
+    let code = attach(sb, family.install_cmd(&sb.cfg.packages, true), "root", "/")?;
     if code != 0 {
         bail!(
-            "installing packages into box {} failed (pacman exited {code}); \
+            "installing packages into box {} failed (the package manager exited {code}); \
              the box is booted but its configured packages are not all present. \
              Fix `packages` in {PROJECT_FILE}, or install them by hand with \
-             `agentbox run --root -- pacman -S PKG`.",
+             `agentbox run --root -- {}`.",
             sb.name,
+            family.install_hint(),
         );
     }
     Ok(())
@@ -1229,8 +1252,14 @@ pub fn check_payload(sb: &Sandbox, program: &OsStr) -> Result<()> {
         )),
         None => msg.push_str("Install it in the box, now:\n"),
     }
+    // The box's own rootfs names its package manager; an image agentbox does
+    // not recognise still gets the rest of the message, which is the part that
+    // matters.
+    let install = distro::family_of_root(&sb.root())
+        .map(|family| family.install_hint())
+        .unwrap_or("<the box's package manager> PKG");
     msg.push_str(&format!(
-        "  agentbox run --root -- pacman -S PKG\n\
+        "  agentbox run --root -- {install}\n\
          or on every creation, in {PROJECT_FILE}:\n  \
          packages = [\"PKG\"]\n\
          docs/usage.md has the long version."

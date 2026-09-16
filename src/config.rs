@@ -64,6 +64,76 @@ pub const DEFAULT_BASE_PACKAGES: &[&str] = &[
     "fish",
 ];
 
+/// The same image, on a Debian-family guest. Not a translation of the list
+/// above but its own list: `base-devel` is `build-essential`, `python` is
+/// `python3`, `fd` is `fd-find`, and a name that does not resolve is a fatal
+/// build, so every entry here is one the archive actually has.
+///
+/// Five entries have no counterpart above and are not optional, all for the
+/// same underlying reason: Arch's `base` drags them in, and Debian's `minbase`
+/// variant - which is "priority: required", one step narrower - does not.
+/// Without systemd, `systemd-sysv` and dbus a box boots to nothing and refuses
+/// every `agentbox shell` (`systemd-run -M` needs the container's own bus).
+/// `systemd-resolved` is a separate package on Debian, and `network = "nat"`
+/// enables that unit per box - enabling a unit that is not installed fails the
+/// launch. `iproute2` is what `nspawn::await_nat_network` polls with
+/// (`ip -4 route show default`, inside the box) to know a nat box's uplink came
+/// up: without it that poll can only time out, so every nat launch stalls for
+/// 15 seconds and then blames the host's network configuration for a package
+/// that is simply absent.
+///
+/// `jujutsu` is missing because Debian has it only in unstable and Ubuntu not
+/// at all; `packages` in a project file, or an install inside the box, is the
+/// way to get `jj` on a Debian-family image.
+pub const DEFAULT_BASE_PACKAGES_DEBIAN: &[&str] = &[
+    "systemd",
+    "systemd-sysv",
+    "systemd-resolved",
+    "dbus",
+    "build-essential",
+    "pkg-config",
+    "sudo",
+    "openssh-client",
+    "ca-certificates",
+    "gnupg",
+    "git",
+    "gh",
+    "git-lfs",
+    "curl",
+    "wget",
+    "rsync",
+    "unzip",
+    "xz-utils",
+    "zstd",
+    "jq",
+    "vim",
+    "less",
+    "man-db",
+    "tree",
+    "file",
+    "diffutils",
+    "iproute2",
+    "iputils-ping",
+    "bind9-dnsutils",
+    "netcat-openbsd",
+    "procps",
+    "psmisc",
+    "strace",
+    "tmux",
+    "ripgrep",
+    "fd-find",
+    "fzf",
+    "python3",
+    "python3-pip",
+    "python3-venv",
+    "nodejs",
+    "npm",
+    "locales",
+    "ncurses-term",
+    "bash-completion",
+    "fish",
+];
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Network {
@@ -390,9 +460,23 @@ fn check_address_families(value: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// The `[base]` table of the global file: what the shared image is built
+/// from, as opposed to how a box is run. Read on its own rather than through a
+/// `Layer`, because none of it is per-project - a project cannot ask for a
+/// different image, only for packages inside the one there is.
+pub fn base_table() -> Result<toml::Table> {
+    let table = read_table(&global_path())?;
+    match table.get("base") {
+        Some(toml::Value::Table(base)) => Ok(base.clone()),
+        Some(_) => bail!("[base] in {} must be a table", global_path().display()),
+        None => Ok(toml::Table::new()),
+    }
+}
+
 /// Packages for the shared base image: `base_packages` at the top level, or
-/// `[base] packages`, else the built-in list.
-pub fn base_packages() -> Result<Vec<String>> {
+/// `[base] packages`, else the built-in list for the guest being built -
+/// which is why the default is passed in rather than read from here.
+pub fn base_packages(default: &[&str]) -> Result<Vec<String>> {
     let table = read_table(&global_path())?;
     let from_key = table.get("base_packages").cloned().or_else(|| {
         table
@@ -405,10 +489,7 @@ pub fn base_packages() -> Result<Vec<String>> {
         Some(value) => Ok(value
             .try_into()
             .context("base_packages must be a list of strings")?),
-        None => Ok(DEFAULT_BASE_PACKAGES
-            .iter()
-            .map(|s| s.to_string())
-            .collect()),
+        None => Ok(default.iter().map(|s| s.to_string()).collect()),
     }
 }
 
@@ -480,20 +561,49 @@ pub fn expand(spec: &str) -> PathBuf {
 mod tests {
     use super::*;
 
-    /// The commented `base_packages` in config.example.toml is the built-in
-    /// list verbatim, so that uncommenting it is a no-op and adding one line to
-    /// it cannot quietly shrink the image - this list replaces the built-in one
-    /// rather than adding to it, unlike every other list in the file. Nothing
-    /// keeps the two in step but this test.
-    #[test]
-    fn the_example_config_shows_the_real_default_package_list() {
-        let listed: Vec<&str> = EXAMPLE_CONFIG
+    /// The strings of the `nth` commented `base_packages = [...]` block in the
+    /// example config.
+    fn example_package_list(nth: usize) -> Vec<&'static str> {
+        EXAMPLE_CONFIG
+            .split("# base_packages = [")
+            .nth(nth + 1)
+            .expect("the example config has this many package lists")
             .lines()
-            .skip_while(|line| !line.starts_with("# base_packages = ["))
             .take_while(|line| !line.starts_with("# ]"))
             .flat_map(|line| line.split('"').skip(1).step_by(2))
-            .collect();
-        assert_eq!(listed, DEFAULT_BASE_PACKAGES);
+            .collect()
+    }
+
+    /// Each commented `base_packages` in config.example.toml is a built-in
+    /// list verbatim, so that uncommenting one is a no-op and adding one line
+    /// to it cannot quietly shrink the image - this list replaces the built-in
+    /// one rather than adding to it, unlike every other list in the file.
+    /// Nothing keeps them in step but this test.
+    #[test]
+    fn the_example_config_shows_the_real_default_package_lists() {
+        assert_eq!(example_package_list(0), DEFAULT_BASE_PACKAGES);
+        assert_eq!(example_package_list(1), DEFAULT_BASE_PACKAGES_DEBIAN);
+    }
+
+    /// A Debian image that cannot boot or be attached to is not a box at all;
+    /// `network = "nat"` enables systemd-resolved per box, which fails if the
+    /// unit is not installed; and `await_nat_network` decides whether a nat
+    /// box has an uplink by running `ip` inside it. These five are
+    /// load-bearing, unlike the rest of the list.
+    #[test]
+    fn the_debian_list_keeps_the_packages_a_bootable_box_needs() {
+        for required in [
+            "systemd",
+            "systemd-sysv",
+            "systemd-resolved",
+            "dbus",
+            "iproute2",
+        ] {
+            assert!(
+                DEFAULT_BASE_PACKAGES_DEBIAN.contains(&required),
+                "{required} is missing from the Debian base image"
+            );
+        }
     }
 
     fn layer(toml_text: &str) -> Layer {

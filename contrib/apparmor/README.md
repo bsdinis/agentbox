@@ -52,7 +52,7 @@ $ sudo apparmor_parser -r -C /etc/apparmor.d/agentbox-nspawn
 $ sudo aa-complain /etc/apparmor.d/agentbox-nspawn        # equivalent, if you prefer
 
 # 3. exercise a box, then look for anything it wanted to do that the profile denies
-$ agentbox shell          # build something, sudo pacman -Syu, git/jj, run your agent
+$ agentbox shell          # build something, upgrade packages, git/jj, run your agent
 $ sudo aa-logprof                                          # walk the audit log
 $ sudo dmesg | grep -i apparmor                            # or read it raw
 

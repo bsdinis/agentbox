@@ -26,7 +26,11 @@ ext4 and gets no reflink) or `machinectl clone` (btrfs only).
 
 overlayfs gives per-project writability at the price of the diff:
 
-* `lowerdir` is the shared base — one copy of Arch for every project.
+* `lowerdir` is the shared base — one copy of the guest distribution for every
+  project. Which one that is follows the host, since the host is what
+  bootstraps it: Arch via `pacman --root`, Debian or Ubuntu via `debootstrap`
+  (see `src/distro.rs`, and setup.md for how to override it). Nothing below
+  this line differs between them.
 * `upperdir` holds every write the box has ever made. `agentbox ls` shows its
   size; a box that has installed a few packages costs tens of megabytes.
 * `agentbox reset` is `rm -rf upper` and a remount. Roughly a second, and it
@@ -37,7 +41,8 @@ overlayfs gives per-project writability at the price of the diff:
   would go on serving the view it cached - a file the rebuild added can be
   listed by `readdir` and still `ENOENT` on open, for as long as that mount
   lives. `agentbox build --refresh` copies the current generation forward and
-  runs `pacman -Syu` on the copy; `--force` (and the first build) bootstraps a
+  upgrades the copy with its own package manager - `pacman -Syu`, or
+  `apt-get dist-upgrade`; `--force` (and the first build) bootstraps a
   new generation from scratch. Either way it swaps a `current` pointer to the
   new generation and never touches the directory any live box already opened
   as its lowerdir, so a build no longer has to refuse or unmount anything
@@ -214,7 +219,8 @@ What the boundary actually is:
   independent of uid/caps/namespaces. agentbox applies it — to the direct-launch
   scope and to the booted-box unit — only when the profile is loaded, and always
   best-effort (a leading `-`), so it never turns into a launch gate. It targets
-  AppArmor because the host distro (Arch) ships AppArmor, not SELinux.
+  AppArmor because that is the LSM the hosts agentbox runs on ship - Arch,
+  Debian and Ubuntu all use AppArmor rather than SELinux.
 
 What it is not:
 
@@ -241,7 +247,7 @@ the fastest way to audit what a given project's config will actually expose.
   sandbox shares the host's `/usr`, so in-sandbox package installation is not
   really on the table, and neither is a working `sudo`. Those were requirements.
 * **Docker/Podman** would work, but a `Dockerfile` per project plus image
-  rebuild cycles is a heavier UX than one TOML file, and `pacman -S` inside a
+  rebuild cycles is a heavier UX than one TOML file, and installing a package inside a
   container whose changes vanish on exit trains bad habits. nspawn's persistent
   machine model fits an agent's long-lived workspace better.
 * **A VM per project** is the right answer for hostile code and the wrong one
@@ -260,7 +266,8 @@ the fastest way to audit what a given project's config will actually expose.
 | `src/config.rs` | Layered TOML: defaults, global file, project file, CLI overrides. Lists accumulate, tables merge, scalars replace. Unknown keys are an error, so typos surface immediately. |
 | `src/sandbox.rs` | One box: its name (project basename plus a hash of the path), its paths, its bind list, its environment, its UID shift. |
 | `src/nspawn.rs` | The overlay mount, the generated `.nspawn` file, mount-point preparation for `owneridmap`, and launching. |
-| `src/base.rs` | The five build stages, from `pacman --root` to the final ownership shift. |
+| `src/base.rs` | The five build stages and the generation bookkeeping around them, ending in the one-time ownership shift. |
+| `src/distro.rs` | The only module that knows what a distribution is: which one this host can bootstrap and how, the built-in package list, the install and upgrade commands, and the image setup script. |
 
 `cargo test` covers the parts where a silent mistake would be expensive:
 config layering, `$VAR`/`~` expansion, `src:dst` splitting with escaped

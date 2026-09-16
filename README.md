@@ -2,16 +2,21 @@
 
 Per-project sandboxes for coding agents, built on `systemd-nspawn`.
 
-You point it at a project directory and get a throwaway Arch Linux box that the
-agent can wreck freely: it can `pacman -S` whatever it likes, run `sudo`, break
+You point it at a project directory and get a throwaway Linux box that the
+agent can wreck freely: it can install whatever it likes, run `sudo`, break
 its own `/etc`, and it still cannot touch anything on the host except the
 directories you mapped in.
+
+The box runs the same distribution the host does — Arch on an Arch host,
+Debian or Ubuntu on a Debian or Ubuntu one — because the host is what
+bootstraps it ([setup.md](docs/setup.md#which-distribution-is-inside-the-box)).
+Nothing else about a box differs between them.
 
 ```console
 $ cd ~/dev/myproject
 $ agentbox init                 # writes .agentbox.toml
 $ agentbox shell                # you are now inside the sandbox
-[bsdinis@myproject-4f1c ~/dev/myproject]$ sudo pacman -S cargo-nextest
+[bsdinis@myproject-4f1c ~/dev/myproject]$ sudo pacman -S cargo-nextest   # or apt-get install
 [bsdinis@myproject-4f1c ~/dev/myproject]$ jj st
 [bsdinis@myproject-4f1c ~/dev/myproject]$ claude --dangerously-skip-permissions
 ```
@@ -20,9 +25,9 @@ $ agentbox shell                # you are now inside the sandbox
 
 | Requirement | How |
 | --- | --- |
-| Install packages inside the box | Full Arch rootfs with a working `pacman` + keyring; writes land in a per-project overlay |
-| `sudo` that cannot reach the host | Container `root` is an unprivileged host UID via a user namespace; `wheel` is `NOPASSWD` inside |
-| `git` and `jj` work normally | Both preinstalled; host `~/.gitconfig` and `~/.config/jj` mapped read-only; bind mounts are ID-mapped so file ownership matches and no `safe.directory` warnings appear |
+| Install packages inside the box | A full rootfs with a working package manager and keyring (`pacman` or `apt`); writes land in a per-project overlay |
+| `sudo` that cannot reach the host | Container `root` is an unprivileged host UID via a user namespace; the admin group (`wheel`, or `sudo` on Debian) is `NOPASSWD` inside |
+| `git` and `jj` work normally | Both preinstalled (`jj` on Arch only - no Debian stable or Ubuntu LTS packages it yet); host `~/.gitconfig` and `~/.config/jj` mapped read-only; bind mounts are ID-mapped so file ownership matches and no `safe.directory` warnings appear |
 | Read-write code, read-only references | Project dir is always read-write; `rw = [...]` and `ro = [...]` add more, mounted at their real host paths |
 | One-command setup per project | `agentbox init` + `agentbox shell` |
 
@@ -41,7 +46,8 @@ $ agentbox shell                # you are now inside the sandbox
 ```console
 $ git clone <this repo> ~/dev/agentbox
 $ cd ~/dev/agentbox
-$ ./install-deps.sh            # host packages: systemd-container, rust, nat networking
+$ ./install-deps.sh            # host packages: systemd-container, rust, the
+                               # bootstrapper for this host, nat networking
 $ cargo install --path .       # builds and installs to ~/.cargo/bin/agentbox
 $ agentbox build               # one-time: build the shared base image (~5 min)
 ```
@@ -109,9 +115,11 @@ src/config.rs    layered TOML config, path expansion
 src/sandbox.rs   one box: naming, paths, mounts, environment
 src/nspawn.rs    overlay mount, generated .nspawn settings, launching
 src/base.rs      building and refreshing the shared base image
+src/distro.rs    what the guest distribution is: bootstrap, packages, setup
+src/session.rs   who owns a running box and when it powers off
+src/cmds.rs      subcommand bodies and [BOX] argument resolution
 src/host.rs      the privilege boundary: sudo re-exec, caller identity
-contrib/         the original Python prototype (reference) and an optional
-                 AppArmor profile (contrib/apparmor/)
+contrib/         an optional AppArmor profile (contrib/apparmor/)
 ```
 
 State on disk:

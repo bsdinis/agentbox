@@ -24,7 +24,7 @@ left blank, and `agentbox config` prints what a project actually resolves to.
 | `rw` | list of strings | `[]` | Extra read-write mounts. `"PATH"` or `"HOST:CONTAINER"`. A box can write these, and the host may later execute what it wrote — see [security.md](security.md). |
 | `ro` | list of strings | `["~/.gitconfig", "~/.config/jj", "~/.config/git"]` | Read-only mounts, same syntax. |
 | `cpy` | list of strings | `[]` | One-time copy-if-absent sources, same `"src"`/`"src:dst"` syntax as `rw`/`ro`. See [below](#cpy-one-time-copy-if-absent). |
-| `packages` | list of strings | `[]` | pacman packages installed into the box the first time it is created. |
+| `packages` | list of strings | `[]` | Packages installed into the box the first time it is created, named as the guest's own archive names them (`pacman` on an Arch image, `apt-get` on a Debian-family one — see [setup.md](setup.md#which-distribution-is-inside-the-box)). |
 | `env` | table | `{}` | Variables set inside the box, verbatim. |
 | `pass_env` | list of strings | `["TERM", "COLORTERM", "LANG"]` | Host variables forwarded **if set**. Use for `ANTHROPIC_API_KEY`, `GITHUB_TOKEN`. |
 | `ssh_keys` | list of strings | `[]` | Private-key paths the box may use. agentbox starts a **dedicated** ssh-agent holding only these keys (added with `ssh-add -c` unless `ssh_keys_confirm = false`, so by default each use prompts you on the host to confirm), puts a `socat` relay in front of it, and binds *the relay's* socket to `~/.agentbox/ssh-agent.sock`, exporting `SSH_AUTH_SOCK`. The relay exists because the box runs in its own user namespace: a direct bind of the agent's own socket would let a box process connect, but `ssh-agent`'s own peer-UID check (`SO_PEERCRED`) would then reject it, since the box's real host-level UID is never the invoking user's — `owneridmap` only translates file ownership, not process credentials. Requires `socat` on the host (see `docs/setup.md`). The host's own `$SSH_AUTH_SOCK` is never forwarded. Empty (the default) means no agent and no forwarding. Fails closed: a missing key, or a missing `socat`, aborts the launch. |
@@ -83,10 +83,28 @@ Global-config-only:
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `base_packages` | list of strings | see `DEFAULT_BASE_PACKAGES` in `src/config.rs` | Packages in the shared base image. Replaces the built-in list rather than adding to it. Apply with `agentbox build --refresh`, safe to run with boxes still up - it builds a new base generation rather than rewriting the one any running box has mounted. An existing box keeps its old generation until you `agentbox remount <box>` (or `reset`) it onto the new one; see [setup.md](setup.md#adding-a-package-to-every-box). |
+| `base_packages` | list of strings | `DEFAULT_BASE_PACKAGES` (Arch) or `DEFAULT_BASE_PACKAGES_DEBIAN` (Debian family) in `src/config.rs`, both reproduced in `config.example.toml` | Packages in the shared base image. Replaces the built-in list rather than adding to it. Apply with `agentbox build --refresh`, safe to run with boxes still up - it builds a new base generation rather than rewriting the one any running box has mounted. An existing box keeps its old generation until you `agentbox remount <box>` (or `reset`) it onto the new one; see [setup.md](setup.md#adding-a-package-to-every-box). |
 
 In the global file you may put the per-box keys either at the top level or
 under a `[defaults]` table; both work, and `[defaults]` is clearer.
+
+### The base image
+
+`[base]` in the global file describes the shared image rather than any box, so
+none of it can be set per project: there is one image per host and every box
+overlays it. `base_packages` may also be spelled `[base] packages`.
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `distro` | `"arch"` \| `"debian"` \| `"ubuntu"` | whatever this host is, via `/etc/os-release` `ID`/`ID_LIKE` | Which distribution to bootstrap. Only useful where the other family's bootstrapper is installed too, since the host is what builds the image. |
+| `suite` | string | the host's own `VERSION_CODENAME` (`"stable"` when building Debian on a non-Debian host) | Debian-family release to bootstrap, e.g. `"trixie"`, `"noble"`. Must be one the host's `debootstrap` has a script for (`/usr/share/debootstrap/scripts/`). |
+| `mirror` | URL | the mirror this host's own apt uses, else `deb.debian.org`/`archive.ubuntu.com` | Where the image's packages come from. Read from `/etc/apt/sources.list` and `/etc/apt/sources.list.d/<id>.sources` only — deliberately not from every file there, since a PPA can carry the same suite and a `main` component and would otherwise be mistaken for the archive. |
+| `security_mirror` | URL | the main mirror's sibling `…/debian-security`, else `security.debian.org` | Debian only. Ubuntu serves `-security` from the main mirror, so this is unused there. |
+| `components` | string | `"main restricted universe multiverse"` (Ubuntu), `"main contrib non-free-firmware"` (Debian) | Space-separated archive components. |
+
+Changing any of them affects the next `agentbox build --force`; `--refresh`
+deliberately follows the generation it copies instead, so it can never change
+the distribution under a box.
 
 ## Mount path semantics
 
@@ -283,8 +301,9 @@ it in `.agentbox.toml`.
 
 | Path | Contents |
 | --- | --- |
-| `/var/lib/agentbox/bases/<id>/` | One base generation - a full Arch install, one directory per `agentbox build`. A running box's overlay keeps whichever generation it was mounted on as its lowerdir even after a later build; unreferenced ones are garbage-collected opportunistically (see `docs/design.md`). |
+| `/var/lib/agentbox/bases/<id>/` | One base generation - a full install of whatever this host builds (see [setup.md](setup.md#which-distribution-is-inside-the-box)), one directory per `agentbox build`. A running box's overlay keeps whichever generation it was mounted on as its lowerdir even after a later build; unreferenced ones are garbage-collected opportunistically (see `docs/design.md`). |
 | `/var/lib/agentbox/bases/<id>.uid_base` | The `uid_base` that generation's on-disk ownership was shifted for. A box configured with a different one refuses to mount against it. |
+| `/var/lib/agentbox/bases/<id>.distro` | Which package manager that generation is driven by, so `--refresh` upgrades it with its own. A generation built before this was recorded falls back to its own `/etc/os-release`. |
 | `/var/lib/agentbox/bases/current` | Which generation a fresh mount targets. Only ever repointed once a whole build has finished. |
 | `/var/lib/agentbox/boxes/<box>/upper` | Every byte this box has written. |
 | `/var/lib/agentbox/boxes/<box>/work` | overlayfs scratch area. Do not touch. |

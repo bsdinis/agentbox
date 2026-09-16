@@ -8,9 +8,13 @@ $ agentbox init          # writes .agentbox.toml; edit the rw/ro lists
 $ agentbox shell         # first run creates the box, then drops you in
 ```
 
-Inside, you are your own username, in your project directory, with `sudo`,
-`pacman`, `git` and `jj`. Exit with `exit`; the box and everything it installed
-stays until you `agentbox reset` or `agentbox rm`.
+Inside, you are your own username, in your project directory, with `sudo`, a
+package manager and `git`. The box runs the same distribution the host does
+([setup.md](setup.md#which-distribution-is-inside-the-box)), so that is
+`pacman` and `jj` on an Arch host, `apt-get` on a Debian or Ubuntu one (where
+`jj` is not packaged, and has to be added to `packages` or installed by hand).
+Exit with `exit`; the box and everything it installed stays until you
+`agentbox reset` or `agentbox rm`.
 
 ## Daily workflow
 
@@ -47,10 +51,16 @@ $ agentbox run -- ./flaky-test 2>errors.log
 Just do it. The box has a working keyring and its own writable `/usr`.
 
 ```console
-[box]$ sudo pacman -S cargo-nextest postgresql
+[box]$ sudo pacman -S cargo-nextest postgresql        # Arch box
+[box]$ sudo apt-get install postgresql redis-server   # Debian/Ubuntu box
 [box]$ npm install -g @anthropic-ai/claude-code
 [box]$ pip install --user ruff        # or use a venv; both work
 ```
+
+Package *names* are the one thing that does not carry across: `packages` in a
+`.agentbox.toml` is a list for whichever archive the image was built from, so
+a project file shared between an Arch host and a Debian one needs the names
+its own host understands.
 
 Writes go to that box's overlay, never to the shared base image and never to
 the host. To make packages part of the box from the start, list them in
@@ -181,7 +191,7 @@ network = "none"   # no network at all
 ```
 
 `nat` is the default: the box gets its own network namespace with working
-outbound connectivity (`pacman`, `npm` and API calls all work), while the host's
+outbound connectivity (package installs, `npm` and API calls all work), while the host's
 `localhost` services and abstract-namespace sockets (e.g. the X11 display) stay
 out of reach.
 

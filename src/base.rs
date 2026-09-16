@@ -1,5 +1,10 @@
-//! Building the shared base image: a normal Arch install, then a one-time
-//! ownership shift into the container UID range.
+//! Building the shared base image: a normal install of whatever distribution
+//! this host can bootstrap, then a one-time ownership shift into the container
+//! UID range.
+//!
+//! Which distribution that is, and everything that differs between them, lives
+//! in `distro`; this module is the five stages and the generation bookkeeping
+//! they happen inside.
 //!
 //! The image lives as a sequence of *generations* under `bases/<id>/`, not one
 //! mutable directory. A box's overlay has a generation directory open as its
@@ -20,6 +25,7 @@ use anyhow::{bail, Context, Result};
 
 use crate::argv;
 use crate::config::{self, UID_RANGE};
+use crate::distro::{self, Family, Guest};
 use crate::host::{dry_run, host, oss, sh};
 use crate::info;
 use crate::nspawn;
@@ -83,18 +89,40 @@ fn generation_uid_base_path(id: &str) -> PathBuf {
     bases_dir().join(format!("{id}.uid_base"))
 }
 
+/// Where a generation's distribution is stamped, beside it for the same reason
+/// as `uid_base`.
+fn generation_distro_path(id: &str) -> PathBuf {
+    bases_dir().join(format!("{id}.distro"))
+}
+
+/// Which package manager a generation is driven by: the stamp if there is one,
+/// else the image's own os-release. A generation built before this was
+/// recorded still answers correctly through the second path, so `--refresh`
+/// never has to guess.
+pub fn generation_family(id: &str) -> Option<Family> {
+    let stamped = fs::read_to_string(generation_distro_path(id))
+        .ok()
+        .and_then(|text| Family::parse(text.trim()));
+    stamped.or_else(|| distro::family_of_root(&generation_dir(id)).ok())
+}
+
 /// Record what a generation's on-disk ownership was shifted for, so a box
 /// configured with a different `uid_base` can be refused at mount time
 /// instead of silently seeing ownership that does not match its own
 /// `PrivateUsers=` range.
-fn stamp_generation(id: &str, uid_base: u32) -> Result<()> {
+fn stamp_generation(id: &str, uid_base: u32, family: Family) -> Result<()> {
     if dry_run() {
         return Ok(());
     }
     fs::create_dir_all(bases_dir())?;
-    let path = generation_uid_base_path(id);
-    fs::write(&path, format!("{uid_base}\n"))
-        .with_context(|| format!("cannot stamp {}", path.display()))
+    for (path, value) in [
+        (generation_uid_base_path(id), uid_base.to_string()),
+        (generation_distro_path(id), family.as_str().to_string()),
+    ] {
+        fs::write(&path, format!("{value}\n"))
+            .with_context(|| format!("cannot stamp {}", path.display()))?;
+    }
+    Ok(())
 }
 
 /// What a generation was shifted for, or `None` if it predates this being
@@ -163,6 +191,7 @@ pub fn gc_generations() {
             .allow_fail()
             .run();
         let _ = fs::remove_file(generation_uid_base_path(&id));
+        let _ = fs::remove_file(generation_distro_path(&id));
     }
 }
 
@@ -189,10 +218,19 @@ fn in_image(
     base: &Path,
     cmd: Vec<OsString>,
     uid_base: Option<u32>,
-    host_cache: bool,
+    host_cache: Option<&str>,
 ) -> Result<()> {
     // --background= for the same reason as the box launches: a build is long
     // and interactive, and there is no config to consult this early.
+    //
+    // `replace-host` rather than `copy-host` for the reason spelled out in
+    // `nspawn::settings_text`: `copy-host` does nothing when the image's
+    // `/etc/resolv.conf` is a symlink, and a Debian image grows exactly that
+    // symlink the moment `systemd-resolved` is installed - which is stage 2,
+    // so every stage after it would run without a resolver. A fresh build
+    // survives that (only stage 2 needs the network, and debootstrap leaves a
+    // regular file behind for it), but `--refresh` upgrades an image that
+    // already has the symlink, so its `apt-get update` would resolve nothing.
     let mut args = argv![
         "systemd-nspawn",
         "-q",
@@ -200,14 +238,14 @@ fn in_image(
         base,
         "--as-pid2",
         "--register=no",
-        "--resolv-conf=copy-host",
+        "--resolv-conf=replace-host",
         "--timezone=off",
         "--background="
     ];
-    if host_cache {
+    if let Some(cache) = host_cache {
         // Share the host's package cache: a fresh build downloads almost
         // nothing, and whatever it does download stays useful to the host.
-        args.push(oss("--bind=/var/cache/pacman/pkg"));
+        args.push(oss(format!("--bind={cache}")));
     }
     if let Some(uid_base) = uid_base {
         args.push(oss(format!("--private-users={uid_base}:{UID_RANGE}")));
@@ -238,7 +276,7 @@ pub fn build(refresh: bool, force: bool) -> Result<()> {
     gc_generations();
 
     let uid_base = config::global_uid_base()?;
-    let packages = config::base_packages()?;
+    let guest = distro::guest()?;
     let current = current_id();
     let exists = generation_exists(&current);
 
@@ -254,8 +292,16 @@ pub fn build(refresh: bool, force: bool) -> Result<()> {
     // takes precedence when both are given, exactly as it did when refresh
     // meant "pacman -Syu in place" - see the branch below.
     if exists && refresh && !force {
-        return refresh_generation(&current, uid_base, &packages);
+        // A refresh follows the generation it copies, not what this host would
+        // build today: the copy is upgraded with its own package manager, and
+        // its own family's built-in package list is the one whose names exist
+        // in it. Only `--force` changes the distribution.
+        let family = generation_family(&current).unwrap_or(guest.family);
+        let packages = config::base_packages(family.default_base_packages())?;
+        return refresh_generation(&current, uid_base, &packages, family);
     }
+
+    let packages = config::base_packages(guest.family.default_base_packages())?;
 
     if force && exists {
         crate::warn(
@@ -271,32 +317,50 @@ pub fn build(refresh: bool, force: bool) -> Result<()> {
     // more (see `gc_generations`).
     let id = new_generation_id();
     let base = generation_dir(&id);
-    bootstrap(&base)?;
+    bootstrap(&guest, &base)?;
 
-    info("initialising the pacman keyring inside the image");
-    in_image(
-        &base,
-        argv![
-            "/bin/bash",
-            "-euo",
-            "pipefail",
-            "-c",
-            "pacman-key --init && pacman-key --populate archlinux"
-        ],
-        None,
-        false,
-    )?;
+    if guest.family == Family::Arch {
+        // Arch only: the image needs its own trusted keyring before it can
+        // install or verify anything on its own later. debootstrap installs
+        // the equivalent keyring package as part of the bootstrap itself.
+        info("initialising the pacman keyring inside the image");
+        in_image(
+            &base,
+            argv![
+                "/bin/bash",
+                "-euo",
+                "pipefail",
+                "-c",
+                "pacman-key --init && pacman-key --populate archlinux"
+            ],
+            None,
+            None,
+        )?;
+    }
 
     info(&format!(
         "installing {} packages inside the image",
         packages.len()
     ));
-    let mut cmd = argv!["/usr/bin/pacman", "-Sy", "--noconfirm", "--needed"];
-    cmd.extend(packages.iter().map(oss));
-    in_image(&base, cmd, None, true)?;
+    in_image(
+        &base,
+        guest.family.install_cmd(&packages, false),
+        None,
+        guest.family.host_cache(),
+    )?;
 
     info("configuring the image");
-    in_image(&base, argv!["/bin/bash", "-c", setup_script()], None, false)?;
+    let user = &host().user;
+    in_image(
+        &base,
+        argv![
+            "/bin/bash",
+            "-c",
+            guest.setup_script(&user.name, user.uid, user.gid)
+        ],
+        None,
+        None,
+    )?;
 
     // The reason boxes start instantly: with the on-disk ownership already
     // matching the container's user namespace, nothing has to be chowned or
@@ -317,11 +381,12 @@ pub fn build(refresh: bool, force: bool) -> Result<()> {
     ])
     .run()?;
 
-    stamp_generation(&id, uid_base)?;
+    stamp_generation(&id, uid_base, guest.family)?;
     set_current(&id)?;
     info(&format!(
-        "base image ready: {} (generation {id})",
-        base.display()
+        "base image ready: {} ({}, generation {id})",
+        base.display(),
+        guest.describe()
     ));
     Ok(())
 }
@@ -335,7 +400,12 @@ pub fn build(refresh: bool, force: bool) -> Result<()> {
 /// not support it, so this pays the image's full size in disk and time - but
 /// the copy, never the original, is what gets upgraded, so nothing already
 /// mounted is ever touched.
-fn refresh_generation(current: &str, uid_base: u32, packages: &[String]) -> Result<()> {
+fn refresh_generation(
+    current: &str,
+    uid_base: u32,
+    packages: &[String],
+    family: Family,
+) -> Result<()> {
     let old = generation_dir(current);
     let id = new_generation_id();
     let new = generation_dir(&id);
@@ -345,11 +415,9 @@ fn refresh_generation(current: &str, uid_base: u32, packages: &[String]) -> Resu
     sh(argv!["cp", "-a", "--reflink=auto", &old, &new]).run()?;
 
     info("refreshing the copy");
-    let mut cmd = argv!["/usr/bin/pacman", "-Syu", "--noconfirm", "--needed"];
-    cmd.extend(packages.iter().map(oss));
-    in_image(&new, cmd, Some(uid_base), false)?;
+    in_image(&new, family.upgrade_cmd(packages), Some(uid_base), None)?;
 
-    stamp_generation(&id, uid_base)?;
+    stamp_generation(&id, uid_base, family)?;
     set_current(&id)?;
     info(&format!(
         "base image ready: {} (generation {id})",
@@ -358,14 +426,127 @@ fn refresh_generation(current: &str, uid_base: u32, packages: &[String]) -> Resu
     Ok(())
 }
 
-/// Stage 1: a minimal system installed by the host's pacman, reusing the host
-/// package cache and keyring. This is what pacstrap does; doing it inline
-/// avoids depending on arch-install-scripts.
-fn bootstrap(base: &Path) -> Result<()> {
+/// Stage 1: a minimal system, installed into an empty directory by whichever
+/// of the host's tools can do it.
+///
+/// This is the one stage that runs on the host rather than inside the image,
+/// because there is nothing inside the image yet to run it. Each family has a
+/// tool for exactly this - `pacman --root`, `debootstrap` - and only the host's
+/// own family's tool can be assumed present, which is why the guest follows
+/// the host unless told otherwise.
+fn bootstrap(guest: &Guest, base: &Path) -> Result<()> {
+    match guest.family {
+        Family::Arch => bootstrap_arch(guest, base),
+        Family::Debian => bootstrap_debian(guest, base),
+    }
+}
+
+/// `debootstrap` into an empty directory, then replace the single-component
+/// archive list it leaves behind.
+///
+/// Unlike the pacman path below, nothing here mounts anything: debootstrap
+/// sets up and tears down the chroot's /proc itself, with a fresh mount rather
+/// than a bind of the host's, so none of the mount-propagation care that
+/// `bootstrap_arch` needs applies - there is no host subtree inside the image
+/// to propagate an unmount back out through.
+fn bootstrap_debian(guest: &Guest, base: &Path) -> Result<()> {
+    let tool = ["/usr/sbin/debootstrap", "/usr/bin/debootstrap"]
+        .into_iter()
+        .map(PathBuf::from)
+        .find(|path| path.exists())
+        .context(
+            "the base image is bootstrapped with debootstrap, which this host does not \
+             have; install it (`apt-get install debootstrap`)",
+        )?;
+    let script = Path::new("/usr/share/debootstrap/scripts").join(&guest.suite);
+    if !script.exists() {
+        bail!(
+            "this host's debootstrap has no script for suite {:?} ({} does not exist), \
+             so it cannot bootstrap that release. Name a suite it does have, in {}:\n  \
+             [base]\n  suite = \"...\"",
+            guest.suite,
+            script.display(),
+            config::global_path().display()
+        );
+    }
+    info(&format!(
+        "bootstrapping {} into {} from {}",
+        guest.describe(),
+        base.display(),
+        guest.mirror
+    ));
+    if !dry_run() {
+        fs::create_dir_all(state_dir().join("boxes"))?;
+        fs::create_dir_all(base)?;
+    }
+    // minbase is the smallest variant that still has apt, which is all the
+    // later stages need - every other package in the image is named by
+    // `base_packages` and installed from inside it, exactly as on Arch.
+    // ca-certificates comes in here rather than there so that an https mirror
+    // is usable by the time apt is first run inside the image.
+    //
+    // Run it from the state directory, not the cwd agentbox was invoked from:
+    // debootstrap fetches with `wget`, which drops a `wget-log` beside itself
+    // whenever it cannot write its output to the terminal, and every stage
+    // here runs as root after the sudo re-exec. Inheriting the caller's cwd
+    // therefore litters root-owned `wget-log`, `wget-log.1`, ... into whatever
+    // directory the user happened to type `agentbox build` in - a git repo,
+    // usually, where they show up as untracked files nobody can delete
+    // without sudo.
+    sh(argv![
+        tool,
+        "--variant=minbase",
+        format!(
+            "--components={}",
+            guest
+                .components
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        "--include=ca-certificates",
+        &guest.suite,
+        base,
+        &guest.mirror
+    ])
+    .cwd(state_dir())
+    .run()?;
+    write_apt_sources(guest, base)
+}
+
+/// Point the image at the full archive. debootstrap writes a one-line list
+/// naming only the components it was given and no -updates or -security
+/// pocket, so a box would never see a security update; this replaces it
+/// outright rather than adding to it, because two lists naming the same
+/// archive make every `apt-get update` in every box warn about duplicates.
+fn write_apt_sources(guest: &Guest, base: &Path) -> Result<()> {
+    if dry_run() {
+        return Ok(());
+    }
+    let dir = base.join("etc/apt/sources.list.d");
+    fs::create_dir_all(&dir)?;
+    let path = dir.join("agentbox.sources");
+    fs::write(&path, guest.sources_text())
+        .with_context(|| format!("cannot write {}", path.display()))?;
+    let legacy = base.join("etc/apt/sources.list");
+    if legacy.exists() {
+        fs::remove_file(&legacy).with_context(|| format!("cannot remove {}", legacy.display()))?;
+    }
+    Ok(())
+}
+
+/// Stage 1 on Arch: a minimal system installed by the host's pacman, reusing
+/// the host package cache and keyring. This is what pacstrap does; doing it
+/// inline avoids depending on arch-install-scripts.
+fn bootstrap_arch(guest: &Guest, base: &Path) -> Result<()> {
     if !Path::new("/usr/bin/pacman").exists() {
         bail!("the base image is bootstrapped with pacman, which this host does not have");
     }
-    info(&format!("bootstrapping Arch into {}", base.display()));
+    info(&format!(
+        "bootstrapping {} into {}",
+        guest.describe(),
+        base.display()
+    ));
 
     let state = state_dir();
     let conf = state.join("pacman-build.conf");
@@ -657,39 +838,6 @@ fn unmount_api(mounted: &[PathBuf]) {
             .allow_fail()
             .run();
     }
-}
-
-/// Stage 3: make the image a usable dev box for the invoking user. The sandbox
-/// user mirrors the host user so that `~` and project paths are spelled
-/// identically inside and outside.
-fn setup_script() -> String {
-    let user = &host().user;
-    let name = shell_quote(&user.name);
-    format!(
-        r#"set -euo pipefail
-sed -i 's/^#\(en_US.UTF-8 UTF-8\)/\1/' /etc/locale.gen
-locale-gen
-printf 'LANG=en_US.UTF-8\n' > /etc/locale.conf
-sed -i 's/^#\(Color\)/\1/;s/^#\(ParallelDownloads.*\)/\1/' /etc/pacman.conf
-: > /etc/machine-id
-printf 'agentbox\n' > /etc/hostname
-groupadd -g {gid} -o {name} 2>/dev/null || true
-useradd -m -u {uid} -g {gid} -G wheel -s /bin/bash {name} 2>/dev/null || true
-passwd -d {name} >/dev/null 2>&1 || true
-install -d -m 750 /etc/sudoers.d
-printf '%%wheel ALL=(ALL:ALL) NOPASSWD: ALL\n' > /etc/sudoers.d/00-agentbox
-chmod 440 /etc/sudoers.d/00-agentbox
-printf 'Defaults env_keep += "CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY GITHUB_TOKEN"\n' > /etc/sudoers.d/10-agentbox-env
-chmod 440 /etc/sudoers.d/10-agentbox-env
-"#,
-        uid = user.uid,
-        gid = user.gid,
-        name = name,
-    )
-}
-
-fn shell_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', r"'\''"))
 }
 
 #[cfg(test)]

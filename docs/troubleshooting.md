@@ -26,16 +26,20 @@ On systemd 249-255 the equivalent of the first is `PrivateUsersChown=`, but
 
 ## `<program>: not found in box <name>`
 
-The box does not have that program. A box is a separate Arch install: it starts
-from the shared base image and whatever `packages` you asked for, so nothing
+The box does not have that program. A box is a separate install of the
+distribution the host builds: it starts from the shared base image and whatever `packages` you asked for, so nothing
 you installed on the host is in it unless you put it there. `claude`, `codex`
 and friends are the usual case — see
 [usage.md](usage.md#running-agents-inside).
 
 ```console
-[box]$ sudo pacman -S PKG                          # once, in this box
+[box]$ sudo pacman -S PKG                          # once, in this box (Arch)
+[box]$ sudo apt-get install PKG                    # ... or Debian/Ubuntu
 [box]$ sudo npm install -g @anthropic-ai/claude-code
 ```
+
+agentbox names the right one for you: the "not found in box" message reads the
+box's own `/etc/os-release` before suggesting a command.
 
 ```toml
 packages = ["PKG"]          # .agentbox.toml, installed when the box is created
@@ -63,11 +67,11 @@ The symptom is distinctive: the file is listed, but nothing can touch it.
 -????????? ? ? ? ?            ? /usr/bin/nvim
 [box]$ nvim
 bash: /usr/bin/nvim: No such file or directory
-[box]$ pacman -Qkk neovim
+[box]$ pacman -Qkk neovim          # dpkg -V neovim on a Debian/Ubuntu box
 neovim: 2311 total files, 1 altered file
 ```
 
-pacman is telling the truth: the package is installed and every other file in
+The package manager is telling the truth: the package is installed and every other file in
 it is fine. What is broken is this box's *view* of the base image. The image
 underneath a box's overlay was rewritten while that overlay was mounted on it,
 and overlayfs does not tolerate a lower layer changing underneath it. `readdir`
@@ -139,7 +143,8 @@ reinstalling it writes the file into the box's own upper layer, where the stale
 lower lookup cannot mask it:
 
 ```console
-[box]$ sudo pacman -S --overwrite '/usr/bin/nvim' neovim
+[box]$ sudo pacman -S --overwrite '/usr/bin/nvim' neovim     # Arch
+[box]$ sudo apt-get install --reinstall neovim               # Debian/Ubuntu
 ```
 
 `pacman -Qkk` over everything names the whole blast radius, which is worth
@@ -302,7 +307,10 @@ $ sudo ls /var/lib/agentbox/bases/$(sudo cat /var/lib/agentbox/bases/current)/us
 
 ## Base build fails during bootstrap
 
-Usually the host's pacman keyring or mirrors:
+The bootstrap runs on the host with the host's own tools, so it is usually the
+host's archive setup at fault rather than agentbox.
+
+On an Arch host, the keyring or the mirrors:
 
 ```console
 $ sudo pacman -Sy archlinux-keyring     # refresh host keyring first
@@ -311,7 +319,28 @@ $ head -5 /etc/pacman.d/mirrorlist      # a dead mirror stalls the bootstrap
 ```
 
 The build reuses the host's package cache (`/var/cache/pacman/pkg`) and
-keyring (`/etc/pacman.d/gnupg`), so a broken host pacman breaks the build. A
+keyring (`/etc/pacman.d/gnupg`), so a broken host pacman breaks the build.
+
+On a Debian or Ubuntu host, `debootstrap` itself, and what agentbox worked out
+to hand it — `agentbox --dry-run build` prints the exact command, which is the
+quickest way to see the suite and mirror it chose:
+
+```console
+$ agentbox --dry-run build              # the debootstrap line it will run
+$ ls /usr/share/debootstrap/scripts/    # the suites this host can bootstrap
+```
+
+* *"No such script"* — the host's `debootstrap` is older than the release it
+  is being asked for. Name one it has, under `[base] suite`.
+* *Nothing is downloaded, or every package 404s* — the mirror. agentbox reads
+  it from this host's own `/etc/apt/sources.list`(`.d/<id>.sources`), so a
+  mirror that only carries what this host installs (or an internal one the
+  build cannot reach) needs `[base] mirror` set explicitly.
+* *A package in the list is "not found"* — `base_packages` names something
+  this suite or these components do not have. `[base] components` controls the
+  latter; Ubuntu needs `universe` for much of the default list.
+
+A
 partial generation is safe to ignore: it was never pointed at by `current` (a
 build only advances that once every stage has finished), so the next
 `agentbox build` sees the same "no complete image yet" state as before the
@@ -345,7 +374,7 @@ $ sudo grep "^$USER:" /var/lib/agentbox/bases/$id/etc/passwd
 
 Neither of those is present in a stump. `agentbox build --force` rebuilds from
 scratch; `--refresh` will not help, since it copies whatever `current` names
-forward and runs pacman inside it, and a stump was never shifted.
+forward and runs the package manager inside it, and a stump was never shifted.
 
 ## `pacman` inside the box rejects signatures
 
@@ -358,6 +387,44 @@ The box's own keyring failed to initialise. Fix it in the box:
 
 If a fresh box has the same problem, the base image is at fault:
 `agentbox build --force`.
+
+## `apt-get` inside a Debian/Ubuntu box cannot find a package
+
+The image ships with the archive lists it was built with, exactly as an Arch
+image ships with a synced pacman database, and they go stale the same way:
+
+```console
+[box]$ sudo apt-get update && sudo apt-get install PKG
+```
+
+If the package genuinely is not there, check which components the image was
+built with — Ubuntu keeps most of what a dev box wants in `universe`:
+
+```console
+[box]$ cat /etc/apt/sources.list.d/agentbox.sources
+```
+
+That file is generated at build time from `[base] components`, so widening it
+means `agentbox build --force`, not an edit inside a box.
+
+## A `nat` box on Debian/Ubuntu resolves nothing
+
+`nat` boxes run their own `systemd-resolved`, and Debian's copy of it points
+`/etc/resolv.conf` at its stub. agentbox generates `ResolvConf=replace-host`,
+which overwrites that symlink with the host's resolver config on every launch —
+deliberately not `copy-host`, which silently does nothing when the file it
+would write is a symlink and so left Debian-family boxes with no resolver at
+all. If a box comes up with no DNS but a working route, that is the first thing
+to look at:
+
+```console
+[box]$ ls -l /etc/resolv.conf ; cat /etc/resolv.conf
+[box]$ systemctl status systemd-resolved
+```
+
+`agentbox run <box> --network host -- ...` is the quick way to tell a DNS
+problem from a routing one: if that resolves and `nat` does not, the box's
+resolver is at fault rather than the host's NAT.
 
 ## Overlay will not mount
 
@@ -504,7 +571,8 @@ $ sudo du -sh /var/lib/agentbox/boxes/*/upper    # per box
 $ agentbox reset <box>                           # back to the base image
 ```
 
-Package caches inside the box are the usual culprit: `[box]$ sudo pacman -Scc`.
+Package caches inside the box are the usual culprit: `[box]$ sudo pacman -Scc`
+on an Arch box, `[box]$ sudo apt-get clean` on a Debian or Ubuntu one.
 
 ## sudo asks for a password on every launch
 

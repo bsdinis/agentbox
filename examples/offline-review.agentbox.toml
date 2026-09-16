@@ -1,9 +1,11 @@
 # Locked down: a refactor or review task with no network at all. Everything the
-# agent needs must be baked in at creation time, since pacman cannot reach a
-# mirror once the box exists.
+# agent needs must be baked in at creation time, since the box's package
+# manager cannot reach a mirror once the box exists.
 name = "review"
 network = "none"
 
+# Package names are the guest archive's, so these are the Arch spellings; on a
+# Debian or Ubuntu image the last one is python3-pytest.
 packages = ["ruff", "mypy", "python-pytest"]
 
 # Nothing extra to map: ~/.gitconfig, ~/.config/git and ~/.config/jj come with
