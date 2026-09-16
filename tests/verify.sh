@@ -62,6 +62,7 @@ cleanup() {
   "$AGENTBOX" rm "$SSH" -y >/dev/null 2>&1
   rm -rf "$PROJ" "$REF" "$LIMITS" "$NAT" "$CPY" "$CPYSRC" "$SSH" "$SSHKEYDIR"
   [[ -n "${cwdprobe:-}" ]] && rm -rf "$cwdprobe"
+  [[ -n "${bconf:-}" ]] && rm -rf "$bconf"
   # The throwaway image is owned by the shifted container UIDs, so it needs root.
   [[ -n "$FAKE" ]] && sudo rm -rf "$FAKE"
   [[ -n "$BSTATE" ]] && sudo rm -rf "$BSTATE"
@@ -472,12 +473,25 @@ if [[ -n "${WITH_BUILD:-}" ]]; then
     # leaving `wget-log`, `wget-log.1`, ... behind. No other section would
     # notice.
     #
+    # An empty config directory as well as a throwaway state directory, for the
+    # same reason: what this section tests is the image agentbox builds by
+    # default, and `base_packages`, `[base] distro`, `suite` and `mirror` in the
+    # tester's own ~/.config/agentbox/config.toml would all silently change it.
+    # A personal `base_packages` carried over from another distribution does not
+    # just change the image, it refuses to build at all - correctly - which is
+    # not a failure of anything under test here.
+    #
+    # Only this section. Exporting XDG_CONFIG_HOME for the whole suite would
+    # also move git's own config out from under the host side of the
+    # 'host git identity applies' comparison.
+    #
     # `sudo env VAR=...` rather than `sudo VAR=...`: the latter is refused by
     # default sudoers. Running the build already-root means AGENTBOX_STATE is
     # read from this process rather than being stripped on the way through sudo.
     cwdprobe="$(mktemp -d "$root/agentbox-cwd-XXXXXX")"
-    ( cd "$cwdprobe" && sudo env AGENTBOX_STATE="$BSTATE" "$AGENTBOX" build --force ) \
-      >"$buildlog" 2>&1
+    bconf="$(mktemp -d "$root/agentbox-buildconf-XXXXXX")"
+    ( cd "$cwdprobe" && sudo env AGENTBOX_STATE="$BSTATE" XDG_CONFIG_HOME="$bconf" \
+        "$AGENTBOX" build --force ) >"$buildlog" 2>&1
     rc=$?
     check 'build succeeded' "$rc" 0
     (( rc == 0 )) || { echo "--- tail of $buildlog ---"; tail -20 "$buildlog"; }

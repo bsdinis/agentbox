@@ -297,11 +297,11 @@ pub fn build(refresh: bool, force: bool) -> Result<()> {
         // its own family's built-in package list is the one whose names exist
         // in it. Only `--force` changes the distribution.
         let family = generation_family(&current).unwrap_or(guest.family);
-        let packages = config::base_packages(family.default_base_packages())?;
+        let packages = base_packages_for(family)?;
         return refresh_generation(&current, uid_base, &packages, family);
     }
 
-    let packages = config::base_packages(guest.family.default_base_packages())?;
+    let packages = base_packages_for(guest.family)?;
 
     if force && exists {
         crate::warn(
@@ -424,6 +424,16 @@ fn refresh_generation(
         new.display()
     ));
     Ok(())
+}
+
+/// The image's package list, refused if it was written for the other
+/// distribution. Both build paths go through here, because both hand the list
+/// straight to a package manager that installs nothing when one name in it
+/// does not resolve - see `Family::check_base_packages`.
+fn base_packages_for(family: Family) -> Result<Vec<String>> {
+    let packages = config::base_packages(family.default_base_packages())?;
+    family.check_base_packages(&packages)?;
+    Ok(packages)
 }
 
 /// Stage 1: a minimal system, installed into an empty directory by whichever

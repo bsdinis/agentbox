@@ -134,6 +134,64 @@ impl Family {
         }
     }
 
+    /// The other family. Only for diagnostics - there are exactly two, and a
+    /// third would turn this into a search rather than a flip.
+    fn other(self) -> Family {
+        match self {
+            Family::Arch => Family::Debian,
+            Family::Debian => Family::Arch,
+        }
+    }
+
+    /// Refuse a `base_packages` list that was written for the other
+    /// distribution, before handing it to a package manager that cannot.
+    ///
+    /// `base_packages` replaces the built-in list rather than adding to it,
+    /// and it is spelled the same whichever guest is being built - but the
+    /// names in it are not portable (`base-devel` is `build-essential`,
+    /// `python-pip` is `python3-pip`, `fd` is `fd-find`). A list carried over
+    /// from an Arch host, or uncommented from the wrong one of the two blocks
+    /// in `config.example.toml`, therefore reaches `apt-get install` intact.
+    ///
+    /// Both package managers are atomic about it: one unresolvable name and
+    /// *nothing* is installed, so the failure does not even look like a
+    /// spelling problem - it looks like every package silently going missing,
+    /// including the ones that were spelled correctly. Catching it here means
+    /// the message can name the entries and say which list to start from.
+    pub fn check_base_packages(self, packages: &[String]) -> Result<()> {
+        let mine = self.default_base_packages();
+        let theirs = self.other().default_base_packages();
+        let foreign: Vec<&str> = packages
+            .iter()
+            .map(String::as_str)
+            .filter(|name| theirs.contains(name) && !mine.contains(name))
+            .collect();
+        if foreign.is_empty() {
+            return Ok(());
+        }
+        bail!(
+            "`base_packages` in {} names {} package{} that only exist on {}: {}.\n\
+             This host builds {} images, and {} installs nothing at all when one \
+             name does not resolve - so every other package in the list would go \
+             missing too, spelled correctly or not.\n\
+             `base_packages` replaces the built-in list rather than adding to it, \
+             and the names are not the same distribution to distribution. \
+             config.example.toml carries one list per family: start from the {} \
+             one, or drop the key to get it as the default.",
+            config::global_path().display(),
+            foreign.len(),
+            if foreign.len() == 1 { "" } else { "s" },
+            self.other().as_str(),
+            foreign.join(", "),
+            self.as_str(),
+            match self {
+                Family::Arch => "pacman",
+                Family::Debian => "apt-get",
+            },
+            self.as_str(),
+        )
+    }
+
     /// The group a box's user is put in to get passwordless sudo.
     fn admin_group(self) -> &'static str {
         match self {
@@ -855,6 +913,67 @@ mod tests {
         assert!(Family::Debian
             .default_base_packages()
             .contains(&"build-essential"));
+    }
+
+    /// The realistic mistake: a config carried from an Arch host, or
+    /// uncommented from the wrong block of config.example.toml, reaching a
+    /// Debian build. apt installs nothing when one name fails, so the whole
+    /// list goes missing - worth refusing before that rather than after.
+    #[test]
+    fn a_base_packages_list_for_the_other_family_is_refused() {
+        let arch: Vec<String> = DEFAULT_BASE_PACKAGES
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let err = Family::Debian
+            .check_base_packages(&arch)
+            .expect_err("an Arch list must not reach apt-get")
+            .to_string();
+        assert!(err.contains("base-devel"), "{err}");
+        assert!(err.contains("only exist on arch"), "{err}");
+        // ...and the mirror image, so neither direction is special-cased.
+        let debian: Vec<String> = DEFAULT_BASE_PACKAGES_DEBIAN
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert!(Family::Arch.check_base_packages(&debian).is_err());
+    }
+
+    #[test]
+    fn each_familys_own_list_passes_its_own_check() {
+        for family in [Family::Arch, Family::Debian] {
+            let own: Vec<String> = family
+                .default_base_packages()
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            assert!(
+                family.check_base_packages(&own).is_ok(),
+                "{} rejected its own built-in list",
+                family.as_str()
+            );
+        }
+    }
+
+    /// Only names that are *exclusive* to the other family count. Plenty are
+    /// spelled identically in both archives, and flagging those would refuse
+    /// every hand-written list that happens to mention git.
+    #[test]
+    fn names_both_families_share_are_not_foreign() {
+        let shared = ["sudo", "git", "curl", "jq", "tmux", "fish"]
+            .map(String::from)
+            .to_vec();
+        for family in [Family::Arch, Family::Debian] {
+            assert!(family.check_base_packages(&shared).is_ok());
+        }
+    }
+
+    /// A list of names neither built-in mentions is the user's business - the
+    /// check is for the one mistake it can prove, not a whitelist.
+    #[test]
+    fn unrecognised_names_are_left_alone() {
+        let theirs = ["cowsay", "some-internal-tool"].map(String::from).to_vec();
+        assert!(Family::Debian.check_base_packages(&theirs).is_ok());
     }
 
     /// The argv as a single plain string. `{:?}` on an `OsString` escapes the

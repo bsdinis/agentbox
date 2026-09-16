@@ -18,15 +18,23 @@
 # components = "main restricted universe multiverse"
 
 # Packages baked into the shared base image. This list REPLACES the built-in
-# one rather than adding to it, so whatever you write here is the whole image -
-# which is why what follows is the built-in list itself, verbatim. Uncommenting
-# one changes nothing; add your own lines to it and nothing goes missing.
+# one rather than adding to it, so whatever you write here is the whole image.
 # Changing it needs `agentbox build --refresh` (adds packages) or `--force`
 # (rebuilds from scratch), with every box powered off - see
 # docs/setup.md#adding-a-package-to-every-box.
 #
-# There is one built-in list per guest, since the names are not the same
-# distribution to distribution. The list for an Arch image:
+# BOTH built-in lists are reproduced below, one per guest family, because the
+# names are NOT portable: `base-devel` is `build-essential`, `python-pip` is
+# `python3-pip`, `fd` is `fd-find`. Uncomment the one matching the image THIS
+# host builds - `agentbox build --dry-run` prints which that is - and adding
+# your own lines to it then takes nothing away. Uncommenting the other one
+# breaks every build: both package managers install nothing at all when a
+# single name fails to resolve, so the whole list goes missing rather than
+# just the wrong entries. agentbox refuses that up front and names the
+# offending packages, rather than letting it look like the image silently
+# lost everything.
+#
+# The list for an Arch image:
 # base_packages = [
 #   "base", "base-devel", "sudo", "openssh", "ca-certificates", "gnupg",
 #   "git", "jujutsu", "github-cli", "git-lfs", "curl", "wget", "rsync",
