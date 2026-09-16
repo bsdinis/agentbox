@@ -94,9 +94,15 @@ still reaches the internet, through the host, which needs two things:
    rewrites, but the rules are not persistent on their own — add them to
    whatever restores your firewall at boot.
 
-If a nat box comes up without a route, `agentbox` warns on launch and points
-here. Without this setup, use `network = "host"` (shares the host's stack - note
-the exposure in [security.md](security.md)) or `network = "none"` (offline).
+`agentbox` checks both of these on every nat launch and warns with the one that
+failed: no default route (1 or 2 above), or a route but nothing getting out of
+the box (3). The second is worth the separate message because `ip route` inside
+such a box looks perfectly healthy while every fetch hangs. The egress probe is
+a TCP connect to the nameserver the host itself uses — off-link from every box,
+so it only answers if the host forwards and masquerades.
+
+Without this setup, use `network = "host"` (shares the host's stack - note the
+exposure in [security.md](security.md)) or `network = "none"` (offline).
 
 ## Install
 

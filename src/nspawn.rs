@@ -1827,6 +1827,53 @@ pub fn canary(sb: &Sandbox, user: &str) -> Result<()> {
 
 /// Canary attempts before giving up - a couple of short retries to ride out the
 /// gap between the bus answering and logind being ready.
+/// Run one short shell script inside the booted box, as root. Returns whether
+/// it exited zero; anything that stops it running at all counts as failure.
+fn probe_in_box(sb: &Sandbox, script: &str) -> bool {
+    std::process::Command::new("systemd-run")
+        .args([
+            "--quiet", "--pipe", "--wait", "-M", &sb.name, "--", "sh", "-c", script,
+        ])
+        .stdin(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// The first nameserver the *host* itself uses, as something to aim an egress
+/// probe at. Read from resolved's uplink file before `/etc/resolv.conf`,
+/// because the latter is usually the stub (`127.0.0.53`), and loopback is
+/// skipped either way: the probe has to leave the box to mean anything.
+///
+/// Deliberately not a hardcoded public address. This one is off-link from
+/// every box (a box's veth is a private /28 of its own), so reaching it needs
+/// the host to forward and masquerade - exactly what is under test - and it is
+/// the user's own infrastructure rather than a third party agentbox picked.
+/// A host with no usable nameserver yields `None`, and the probe is skipped
+/// rather than guessed at.
+fn host_uplink_nameserver() -> Option<String> {
+    ["/run/systemd/resolve/resolv.conf", "/etc/resolv.conf"]
+        .into_iter()
+        .filter_map(|path| std::fs::read_to_string(path).ok())
+        .find_map(|text| first_uplink_nameserver(&text))
+}
+
+/// The parsing half of `host_uplink_nameserver`, kept separate so it can be
+/// tested without a resolv.conf on disk.
+fn first_uplink_nameserver(text: &str) -> Option<String> {
+    text.lines().find_map(|line| {
+        let addr = line.trim().strip_prefix("nameserver")?.trim();
+        // IPv4, non-loopback, and nothing that could be read as anything but
+        // an address - it goes into a shell command in the caller.
+        let plausible = addr.split('.').count() == 4
+            && !addr.starts_with("127.")
+            && addr
+                .split('.')
+                .all(|octet| !octet.is_empty() && octet.bytes().all(|b| b.is_ascii_digit()));
+        plausible.then(|| addr.to_string())
+    })
+}
+
 /// Wait for a nat box's uplink, warning if it never comes.
 ///
 /// A nat box gets its address over the veth from the host's DHCP server a couple
@@ -1834,39 +1881,65 @@ pub fn canary(sb: &Sandbox, user: &str) -> Result<()> {
 /// to be usable before we install packages or run the payload, and returns as
 /// soon as it appears. If it never does, the host side of the veth was not
 /// configured - typically NetworkManager still owns `ve-*`/`vz-*`, so no DHCP
-/// answers and `host0` stays link-local. Point at the fix (docs/setup.md) rather
-/// than failing later with a baffling package-install error. A single in-box
-/// poll loop, so it costs one transient unit whatever the outcome.
+/// answers and `host0` stays link-local.
+///
+/// A route is necessary but not sufficient, so a second probe follows it: a
+/// host that drops the box's *forwarded* traffic leaves the box addressed and
+/// routed and still unable to reach anything. Docker is the common cause - it
+/// sets `iptables -P FORWARD DROP` and whitelists only `docker0` - and that
+/// failure is nastier than no route at all, because `ip route` inside the box
+/// looks perfectly healthy while every fetch hangs. The two get separate
+/// warnings, since they have separate fixes (docs/setup.md).
+///
+/// Both are in-box poll loops with short bounded retries, to ride out DHCP and
+/// resolved still settling, and each costs one transient unit whatever the
+/// outcome.
 pub fn await_nat_network(sb: &Sandbox) -> Result<()> {
     if dry_run() || sb.cfg.network != Network::Nat {
         return Ok(());
     }
-    let up = std::process::Command::new("systemd-run")
-        .args([
-            "--quiet",
-            "--pipe",
-            "--wait",
-            "-M",
-            &sb.name,
-            "--",
-            "sh",
-            "-c",
-            "for _ in $(seq 15); do \
-                 ip -4 route show default 2>/dev/null | grep -q default && exit 0; \
-                 sleep 1; \
-             done; exit 1",
-        ])
-        .stdin(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-    if !up {
+    let routed = probe_in_box(
+        sb,
+        "for _ in $(seq 15); do \
+             ip -4 route show default 2>/dev/null | grep -q default && exit 0; \
+             sleep 1; \
+         done; exit 1",
+    );
+    if !routed {
         crate::warn(&format!(
             "box {0} has network = nat but never got a default route: the host side \
              of its veth was not configured, so the box has no network. On a \
              NetworkManager host, tell NM to leave the container veths alone and \
              enable systemd-networkd - see docs/setup.md, \"nat networking\". Or \
              set network = \"host\".",
+            sb.name
+        ));
+        return Ok(());
+    }
+    // Port 53 on a real nameserver: a DNS server is required to answer TCP, so
+    // a plain connect either succeeds or the packets are not getting out -
+    // no need to tell "refused" from "timed out".
+    let Some(nameserver) = host_uplink_nameserver() else {
+        return Ok(());
+    };
+    let reachable = probe_in_box(
+        sb,
+        &format!(
+            "for _ in $(seq 3); do \
+                 timeout 2 bash -c 'exec 3<>/dev/tcp/{nameserver}/53' 2>/dev/null && exit 0; \
+                 sleep 1; \
+             done; exit 1"
+        ),
+    );
+    if !reachable {
+        crate::warn(&format!(
+            "box {0} has network = nat and a default route, but nothing gets out of \
+             it: the host is not forwarding the box's traffic, so {nameserver} - \
+             which the host itself uses - is unreachable from inside. If Docker is \
+             installed it sets `iptables -P FORWARD DROP` and whitelists only its \
+             own bridge; see docs/setup.md, \"nat networking\", for the \
+             `DOCKER-USER` rules that let the container veths through. Or set \
+             network = \"host\".",
             sb.name
         ));
     }
@@ -1894,6 +1967,42 @@ mod tests {
             ..crate::config::Config::default()
         };
         Sandbox::new(PathBuf::from("/home/me/project"), cfg)
+    }
+
+    /// The probe target has to be somewhere off the box's own link, so the
+    /// stub resolver is exactly the wrong answer: reaching `127.0.0.53` from
+    /// inside a box proves nothing about the host forwarding anything.
+    #[test]
+    fn the_uplink_nameserver_skips_the_local_stub() {
+        assert_eq!(
+            first_uplink_nameserver("nameserver 127.0.0.53\nnameserver 9.9.9.9\n").as_deref(),
+            Some("9.9.9.9")
+        );
+    }
+
+    #[test]
+    fn the_first_usable_nameserver_wins() {
+        let text = "# comment\nsearch example.invalid\nnameserver 1.2.3.4\nnameserver 5.6.7.8\n";
+        assert_eq!(first_uplink_nameserver(text).as_deref(), Some("1.2.3.4"));
+    }
+
+    /// No usable address means the probe is skipped, not aimed at a guess.
+    /// IPv6 is left out deliberately - the probe is an IPv4 TCP connect.
+    #[test]
+    fn a_resolv_conf_with_nothing_routable_yields_none() {
+        assert_eq!(first_uplink_nameserver("nameserver ::1\n"), None);
+        assert_eq!(first_uplink_nameserver("nameserver 127.0.0.1\n"), None);
+        assert_eq!(first_uplink_nameserver("search example.invalid\n"), None);
+        assert_eq!(first_uplink_nameserver(""), None);
+    }
+
+    /// The address is interpolated into a shell command, so anything that is
+    /// not purely digits and dots must not get through.
+    #[test]
+    fn a_nameserver_line_cannot_smuggle_shell_metacharacters() {
+        assert_eq!(first_uplink_nameserver("nameserver 1.2.3.4;id\n"), None);
+        assert_eq!(first_uplink_nameserver("nameserver $(id)\n"), None);
+        assert_eq!(first_uplink_nameserver("nameserver 1.2.3.\n"), None);
     }
 
     #[test]
