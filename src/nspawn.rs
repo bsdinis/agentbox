@@ -1041,6 +1041,13 @@ fn prepare_mount_point(sb: &Sandbox, bind: &Bind) -> Result<()> {
 /// `--dry-run` never mounts the overlay, so there is no way to know whether a
 /// destination is already present inside it; the report below lists the
 /// planned mappings rather than predicting which would actually copy.
+/// An existing directory with nothing in it. Anything that cannot be read as a
+/// directory - a file, a symlink, a permission error - is not one, so the
+/// caller stays quiet rather than guessing.
+fn is_empty_dir(path: &Path) -> bool {
+    std::fs::read_dir(path).is_ok_and(|mut entries| entries.next().is_none())
+}
+
 fn perform_copies(sb: &Sandbox) -> Result<()> {
     let copies = sb.copies();
     if dry_run() {
@@ -1056,7 +1063,32 @@ fn perform_copies(sb: &Sandbox) -> Result<()> {
     for copy in &copies {
         let target = sb.inside(&copy.dst);
         if target.symlink_metadata().is_ok() {
-            continue; // already present: copy-if-absent means leave it alone.
+            // Already present: copy-if-absent means leave it alone, and in the
+            // steady state - the copy landed on some earlier launch and the box
+            // has been using it since - that is exactly right and silent.
+            //
+            // An *empty* destination is worth saying something about, because
+            // the box is about to boot into a config that looks like it was
+            // copied and was not. Moving an entry from `ro` to `cpy` does that:
+            // the bind's mount point was created as root before nspawn started
+            // and lives in the overlay's upper layer, so dropping the bind
+            // leaves an empty directory behind at exactly the path the copy
+            // wants, and the copy declines it. Whatever runs next then writes
+            // its own defaults there and the host's real config never appears,
+            // with nothing in the output to say why.
+            if is_empty_dir(&target) {
+                crate::warn(&format!(
+                    "not copying {} into box {}: {} already exists there and is empty, so \
+                     copy-if-absent left it alone. A bind removed from `rw`/`ro` \
+                     leaves its mount point behind like this - `agentbox reset \
+                     {}` clears the box's writes and copies fresh.",
+                    copy.src.display(),
+                    sb.name,
+                    copy.dst.display(),
+                    sb.name,
+                ));
+            }
+            continue;
         }
         if let Some(parent) = target.parent() {
             create_parents_mapped(sb, parent)?;

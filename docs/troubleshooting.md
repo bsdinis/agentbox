@@ -597,7 +597,22 @@ ever writing back to the host:
 cpy = ["~/.config/fish"]
 ```
 
-`agentbox reset` is what makes the next boot copy it fresh again.
+**Moving an entry from `ro` to `cpy` needs `agentbox reset` on boxes that
+already exist**, or the copy will not happen and the box comes up with none of
+the config. A bind's mount point is created as root before nspawn starts, so it
+lives in the overlay's upper layer; dropping the bind leaves an empty directory
+behind at exactly the path the copy wants, and `cpy` is copy-*if-absent*, so it
+declines. Whatever runs next writes its own defaults there — fish will happily
+generate a stock `config.fish` — and the host's real config never appears.
+agentbox warns when it skips a copy for an empty destination, and names the box
+to reset:
+
+```console
+$ agentbox reset <box>
+```
+
+That clears the box's writes, so the next boot copies fresh. Nothing else in
+the box survives it, which is the point.
 
 **"Unknown command" for your own scripts.** A config that calls a helper of
 your own only works if that helper is mapped too, and a single-file map does
