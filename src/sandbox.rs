@@ -174,9 +174,13 @@ impl Sandbox {
         for (read_only, specs) in [(false, &self.cfg.rw), (true, &self.cfg.ro)] {
             for spec in specs {
                 let (src_spec, dst_spec) = split_spec(spec);
-                let src = expand(&src_spec);
-                let src = src.canonicalize().unwrap_or(src);
-                let dst = dst_spec.map(|d| expand(&d)).unwrap_or_else(|| src.clone());
+                let requested = expand(&src_spec);
+                let src = requested
+                    .canonicalize()
+                    .unwrap_or_else(|_| requested.clone());
+                let dst = dst_spec
+                    .map(|d| expand(&d))
+                    .unwrap_or_else(|| default_dst(&requested));
                 if !src.exists() {
                     crate::warn(&format!(
                         "skipping {} map {} (does not exist)",
@@ -243,9 +247,13 @@ impl Sandbox {
         let mut copies = vec![];
         for spec in &self.cfg.cpy {
             let (src_spec, dst_spec) = split_spec(spec);
-            let src = expand(&src_spec);
-            let src = src.canonicalize().unwrap_or(src);
-            let dst = dst_spec.map(|d| expand(&d)).unwrap_or_else(|| src.clone());
+            let requested = expand(&src_spec);
+            let src = requested
+                .canonicalize()
+                .unwrap_or_else(|_| requested.clone());
+            let dst = dst_spec
+                .map(|d| expand(&d))
+                .unwrap_or_else(|| default_dst(&requested));
             if !src.exists() {
                 crate::warn(&format!(
                     "skipping cpy map {} (does not exist)",
@@ -340,6 +348,43 @@ impl Sandbox {
     pub fn uid_range(&self) -> (u32, u32) {
         (self.cfg.uid_base, self.cfg.uid_base + UID_RANGE - 1)
     }
+}
+
+/// Where a one-sided `rw`/`ro`/`cpy` spec lands inside the box: the path as
+/// written, with `.`/`..` resolved textually but symlinks left alone.
+///
+/// The source is canonicalized - nspawn needs a real path to bind, and the
+/// `owneridmap` and overbroad-source guards want the real one too - but the
+/// *destination* must not inherit that. agentbox's premise is that a path is
+/// spelled the same inside and outside, and canonicalizing the destination
+/// silently breaks it whenever the source is a symlink:
+/// `ro = ["~/.local/bin/claude"]`, where `claude` is a symlink into
+/// `~/.local/share/claude/versions/<v>`, mounted the binary at the *target's*
+/// path and left `~/.local/bin` missing from the box entirely - so the tool
+/// the user asked for was simply not where they asked for it, and nothing
+/// warned.
+///
+/// `..` still has to go, because `unsafe_dst` refuses a destination that is
+/// not lexically normalized - that guard is what stops a `dst` steering the
+/// privileged mount-point create/chown at an arbitrary host path (V3).
+/// Resolving it textually keeps `~/foo/../bar` working without consulting the
+/// filesystem. A `..` that would climb past the root is handed on unchanged
+/// for `unsafe_dst` to refuse, rather than silently swallowed here.
+fn default_dst(requested: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for comp in requested.components() {
+        match comp {
+            Component::ParentDir => {
+                if !out.pop() {
+                    return requested.to_path_buf();
+                }
+            }
+            Component::CurDir => {}
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
 }
 
 /// `"src"` or `"src:dst"`, where `\:` is a literal colon rather than the
@@ -506,6 +551,70 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    /// The destination is the path as written, not where the symlink points.
+    /// `ro = ["~/.local/bin/claude"]` on a `claude` that symlinks into
+    /// `~/.local/share/claude/versions/<v>` used to mount the binary at the
+    /// target's path, leaving `~/.local/bin` absent from the box - the tool was
+    /// simply not where it had been asked for.
+    #[test]
+    fn a_symlinked_source_still_mounts_at_the_path_that_was_written() {
+        let scratch = Scratch::new("bind-symlink");
+        let real = scratch.path().join("versions/2.1.273");
+        std::fs::create_dir_all(real.parent().unwrap()).unwrap();
+        std::fs::write(&real, b"binary").unwrap();
+        let bin = scratch.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let link = bin.join("claude");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let cfg = Config {
+            ro: vec![link.display().to_string()],
+            ..Config::default()
+        };
+        let sb = sandbox_with_cfg(cfg);
+        let bind = sb
+            .binds()
+            .into_iter()
+            .find(|b| b.read_only)
+            .expect("the ro map should be planned");
+        // The source is resolved - nspawn needs a real path to bind - but the
+        // destination is the spelling the user used.
+        assert_eq!(bind.src, real.canonicalize().unwrap());
+        assert_eq!(bind.dst, link);
+    }
+
+    /// The same for `cpy`, which built its destination the same way.
+    #[test]
+    fn a_symlinked_cpy_source_copies_to_the_path_that_was_written() {
+        let scratch = Scratch::new("cpy-symlink");
+        let real = scratch.path().join("real.json");
+        std::fs::write(&real, b"{}").unwrap();
+        let link = scratch.path().join("link.json");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let cfg = Config {
+            cpy: vec![link.display().to_string()],
+            ..Config::default()
+        };
+        let sb = sandbox_with_cfg(cfg);
+        let copies = sb.copies();
+        assert_eq!(copies.len(), 1);
+        assert_eq!(copies[0].dst, link);
+    }
+
+    /// `unsafe_dst` refuses a destination that is not lexically normalized, so
+    /// a `..` in a one-sided spec has to be resolved here - textually, without
+    /// asking the filesystem what any component really is.
+    #[test]
+    fn a_default_destination_resolves_dots_without_following_symlinks() {
+        assert_eq!(default_dst(Path::new("/a/b/../c")), Path::new("/a/c"));
+        assert_eq!(default_dst(Path::new("/a/./b")), Path::new("/a/b"));
+        assert_eq!(default_dst(Path::new("/a/b")), Path::new("/a/b"));
+        // Climbing past the root is left for `unsafe_dst` to reject, rather
+        // than quietly turned into something that passes.
+        assert_eq!(default_dst(Path::new("/../etc")), Path::new("/../etc"));
     }
 
     #[test]

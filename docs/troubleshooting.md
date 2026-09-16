@@ -574,6 +574,84 @@ $ agentbox reset <box>                           # back to the base image
 Package caches inside the box are the usual culprit: `[box]$ sudo pacman -Scc`
 on an Arch box, `[box]$ sudo apt-get clean` on a Debian or Ubuntu one.
 
+## My shell config misbehaves inside a box
+
+Mapping a shell's config directory in with `ro` and pointing the box's login
+shell at it produces three distinct complaints, all of which are the
+configuration doing exactly what it was told.
+
+**"Read-only file system" when the shell starts.** A shell writes to its own
+config directory: fish saves universal variables to
+`~/.config/fish/fish_variables` on every startup, so an `ro` map of
+`~/.config/fish` fails on each launch:
+
+```
+error: Unable to create temporary file '/home/you/.config/fish/fish_variables.XXXXXX': Read-only file system
+```
+
+`ro` is the wrong tool here — the box genuinely needs to write there. Use `cpy`
+instead, which copies the directory in once and lets the box diverge without
+ever writing back to the host:
+
+```toml
+cpy = ["~/.config/fish"]
+```
+
+`agentbox reset` is what makes the next boot copy it fresh again.
+
+**"Unknown command" for your own scripts.** A config that calls a helper of
+your own only works if that helper is mapped too, and a single-file map does
+not bring its directory:
+
+```toml
+ro = ["~/.local/bin/claude"]   # maps ONE file; ~/.local/bin is otherwise empty
+ro = ["~/.local/bin", "~/sbin"]  # maps the directories
+```
+
+**"Unknown command" for a host tool.** `direnv hook fish | source` and friends
+need the tool *in the box*, which mapping your dotfiles does not provide. Add
+it to `packages` (per project) or `base_packages` (the image), or guard the
+line so the same config works both places:
+
+```fish
+command -q direnv; and direnv hook fish | source
+```
+
+## `~/.local/bin` is mapped but nothing in it is found
+
+Two different things look identical here.
+
+The mount may be a single file rather than the directory — see the entry above.
+Check from inside:
+
+```console
+$ agentbox run -- ls -la ~/.local/bin
+```
+
+Otherwise the directory is there and simply is not on `PATH`. systemd-nspawn
+builds the payload's environment itself rather than passing the host's through,
+and the `PATH` it uses is fixed:
+
+```
+/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+```
+
+Nothing under `$HOME` is on it. An interactive login shell usually fixes this
+for itself — fish's `fish_add_path` in `conf.d`, bash's `~/.profile` — which is
+why `agentbox shell` can find a tool that `agentbox run -- tool` cannot. To put
+it on `PATH` for every payload, set it explicitly; `[env] PATH` replaces the
+list above, so spell out the rest of it:
+
+```toml
+[env]
+PATH = "/home/you/.local/bin:/home/you/sbin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+```
+
+`agentbox --dry-run shell` prints the generated settings, so you can check what
+the box will actually get. Note that `[env]` must be the last thing in a
+`.agentbox.toml`: any scalar written below that table header becomes an
+environment variable instead of a setting.
+
 ## sudo asks for a password on every launch
 
 Expected: `agentbox` re-execs itself as root. Either rely on sudo's timestamp,
