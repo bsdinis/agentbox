@@ -466,11 +466,60 @@ fn check_address_families(value: Option<&str>) -> Result<()> {
 /// different image, only for packages inside the one there is.
 pub fn base_table() -> Result<toml::Table> {
     let table = read_table(&global_path())?;
-    match table.get("base") {
-        Some(toml::Value::Table(base)) => Ok(base.clone()),
+    let base = match table.get("base") {
+        Some(toml::Value::Table(base)) => base.clone(),
         Some(_) => bail!("[base] in {} must be a table", global_path().display()),
-        None => Ok(toml::Table::new()),
+        None => return Ok(toml::Table::new()),
+    };
+    check_base_keys(&base)?;
+    Ok(base)
+}
+
+/// Every key `[base]` understands. `global_layer()` lifts the whole table out
+/// before the `deny_unknown_fields` deserialize runs, so without this a typo
+/// or a misplaced key inside `[base]` is simply dropped - the opposite of how
+/// every other key in the file behaves.
+const BASE_KEYS: &[&str] = &[
+    "distro",
+    "suite",
+    "mirror",
+    "security_mirror",
+    "components",
+    "packages",
+];
+
+fn check_base_keys(base: &toml::Table) -> Result<()> {
+    for key in base.keys() {
+        if BASE_KEYS.contains(&key.as_str()) {
+            continue;
+        }
+        // The one worth its own sentence. `base_packages` is a *top-level*
+        // key; writing it below the `[base]` header makes it `base.base_packages`,
+        // which nothing reads - so the image silently falls back to the
+        // built-in list and every package the user added to it goes missing,
+        // with a successful build and no mention of any of it. Same shape as
+        // the `[env]` trap in a project file: a scalar written below a table
+        // header joins the table.
+        if key == "base_packages" {
+            bail!(
+                "{} has `base_packages` inside the `[base]` table, where nothing reads \n\
+                 it - so the image was built from the built-in list and every \n\
+                 package you added was silently dropped.\n\
+                 Spell it `packages` under `[base]`, or move `base_packages` \n\
+                 above the `[base]` header, where it is a top-level key. A \n\
+                 table header captures everything written below it until the \n\
+                 next one.",
+                global_path().display()
+            );
+        }
+        bail!(
+            "unknown key `{key}` in the `[base]` table of {}.\n\
+             `[base]` takes: {}.",
+            global_path().display(),
+            BASE_KEYS.join(", ")
+        );
     }
+    Ok(())
 }
 
 /// Packages for the shared base image: `base_packages` at the top level, or

@@ -7,8 +7,21 @@
 #
 # By default the guest follows the host, because the host is what bootstraps
 # it: an Arch host builds an Arch image with pacman, a Debian or Ubuntu host
-# builds one of its own release with debootstrap. Set these only to override
-# that. Changing any of them needs `agentbox build --force`.
+# builds one of its own release with debootstrap. That default is almost always
+# what you want, and it is what keeps the box's glibc matching the host's -
+# which matters as soon as you map a host-built binary in (`~/.cargo/bin`).
+#
+# The values below are EXAMPLES, not the defaults. Uncommenting `suite` pins
+# whatever codename is written here, so leaving it at "noble" on a newer host
+# silently builds an image two releases behind. Set a key only to override the
+# host, and delete the ones you are not overriding. Changing any of them needs
+# `agentbox build --force`; `--refresh` deliberately follows the generation it
+# copies and can never change the distribution under a running box.
+#
+# `base_packages` is a TOP-LEVEL key and must stay ABOVE this header - written
+# below it, it becomes `[base] base_packages`, which nothing reads. Under
+# `[base]` the key is spelled `packages`. agentbox refuses both mistakes rather
+# than quietly building from the built-in list.
 # [base]
 # distro    = "ubuntu"                       # arch | debian | ubuntu
 # suite     = "noble"                        # release codename (Debian family)
