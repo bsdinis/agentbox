@@ -1235,6 +1235,21 @@ fn resolve(
         .find(|full| exists(full))
 }
 
+/// Whether `found` — a program already located on the host — lands inside a
+/// destination this box's config already binds, and if so, where inside the
+/// box it lands. Checked before suggesting a `ro`/`rw` map so the advice
+/// never tells a user to add one they already have: the common way that
+/// happens is a single-file map (`ro = ["~/.local/bin/claude"]`) whose
+/// directory is simply not on the fixed `PATH` systemd-nspawn gives the
+/// payload (`docs/troubleshooting.md`, "`~/.local/bin` is mapped but nothing
+/// in it is found") — a different fix than "map it".
+fn already_mapped(sb: &Sandbox, found: &Path) -> Option<PathBuf> {
+    sb.binds()
+        .into_iter()
+        .find(|b| found.starts_with(&b.dst) || found.starts_with(&b.src))
+        .map(|b| b.dst)
+}
+
 /// Refuse a payload the box does not have.
 ///
 /// Left to nspawn this arrives as `execv(claude) failed: No such file or
@@ -1276,12 +1291,32 @@ pub fn check_payload(sb: &Sandbox, program: &OsStr) -> Result<()> {
     let on_host =
         env_var("PATH").and_then(|path| resolve(&path, &host().cwd, program, |full| full.exists()));
     match on_host {
-        Some(found) => msg.push_str(&format!(
-            "The host has one at {0}, which {PROJECT_FILE} can map read-only:\n  \
-             ro = [\"{0}\"]\n\
-             Or install it in the box, now:\n",
-            found.display(),
-        )),
+        Some(found) => match already_mapped(sb, &found) {
+            // Already bound in; the missing piece is PATH, not a mapping.
+            Some(dst) => bail!(
+                "{msg}The host has one at {0}, and it is already mapped into the box \
+                 at {1} — but systemd-nspawn gives the payload a fixed PATH that does \
+                 not search anything under $HOME, so a bare `{2}` will not find it there.\n\
+                 Either run it by its full path:\n  \
+                 agentbox run -- {1}\n\
+                 or put its directory on PATH for every payload, in {PROJECT_FILE} \
+                 (as the last table, since `[env]` must come last):\n  \
+                 [env]\n  \
+                 PATH = \"{3}:{NSPAWN_PATH}\"\n\
+                 docs/troubleshooting.md, \"~/.local/bin is mapped but nothing in it is \
+                 found\", has the long version.",
+                found.display(),
+                dst.display(),
+                program.display(),
+                dst.parent().unwrap_or(&dst).display(),
+            ),
+            None => msg.push_str(&format!(
+                "The host has one at {0}, which {PROJECT_FILE} can map read-only:\n  \
+                 ro = [\"{0}\"]\n\
+                 Or install it in the box, now:\n",
+                found.display(),
+            )),
+        },
         None => msg.push_str("Install it in the box, now:\n"),
     }
     // The box's own rootfs names its package manager; an image agentbox does
@@ -2145,6 +2180,79 @@ mod tests {
             ),
             Some(PathBuf::from("/home/me/project/task"))
         );
+    }
+
+    struct Scratch(PathBuf);
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "agentbox-nspawn-test-{name}-{}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            Scratch(dir)
+        }
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn sandbox_with_cfg(cfg: crate::config::Config) -> Sandbox {
+        let _ = crate::host::init(None, false);
+        Sandbox::new(PathBuf::from("/home/me/project"), cfg)
+    }
+
+    /// The exact case that sent a user chasing a warning that told them to
+    /// add a mapping they already had: a single-file `ro` entry with no
+    /// explicit destination, where `found` (the host's copy) lands exactly
+    /// on the bind's `dst`.
+    #[test]
+    fn already_mapped_finds_a_bare_single_file_map() {
+        let scratch = Scratch::new("single-file");
+        let program = scratch.path().join("claude");
+        std::fs::write(&program, "").unwrap();
+        let sb = sandbox_with_cfg(crate::config::Config {
+            ro: vec![program.display().to_string()],
+            ..crate::config::Config::default()
+        });
+        assert_eq!(already_mapped(&sb, &program), Some(program));
+    }
+
+    /// The directory form of the same map (`ro = ["~/.local/bin"]`) also
+    /// counts, with the program found somewhere underneath it.
+    #[test]
+    fn already_mapped_finds_a_program_under_a_mapped_directory() {
+        let scratch = Scratch::new("dir-map");
+        std::fs::write(scratch.path().join("claude"), "").unwrap();
+        let sb = sandbox_with_cfg(crate::config::Config {
+            rw: vec![scratch.path().display().to_string()],
+            ..crate::config::Config::default()
+        });
+        let found = scratch.path().join("claude");
+        assert_eq!(
+            already_mapped(&sb, &found),
+            Some(scratch.path().to_path_buf())
+        );
+    }
+
+    /// A program the config says nothing about is not mistaken for one that
+    /// is - this is what keeps the ordinary "map it" suggestion alive.
+    #[test]
+    fn already_mapped_is_none_for_an_unrelated_program() {
+        let scratch = Scratch::new("unrelated");
+        let mapped = scratch.path().join("other-dir");
+        std::fs::create_dir_all(&mapped).unwrap();
+        let sb = sandbox_with_cfg(crate::config::Config {
+            ro: vec![mapped.display().to_string()],
+            ..crate::config::Config::default()
+        });
+        let found = scratch.path().join("claude");
+        assert_eq!(already_mapped(&sb, &found), None);
     }
 
     #[test]
